@@ -8,6 +8,9 @@
  * - streaming the body to a temp file with a hard byte cap (never buffers it)
  */
 
+import { lookup } from "node:dns";
+import { Agent } from "undici";
+import { isBlockedIp } from "@/lib/ip";
 import { createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
@@ -16,6 +19,21 @@ import { getConfig } from "@/lib/config";
 import { DownloadError } from "@/lib/errors";
 import { assertSafeRemoteHost, resolveAllowedRedirect } from "@/lib/download-validation";
 import { contentTypeKind, type MediaKind } from "@/lib/media-inspect";
+
+// Validate DNS answers inside the connection lookup, eliminating the check/use
+// rebinding gap. Preserve the original hostname for TLS SNI and Host headers.
+const safeAgent = new Agent({ connect: { lookup(hostname, options, callback) {
+  lookup(hostname, { all: true, verbatim: true }, (error, records) => {
+    if (error || !records.length || records.some((record) => isBlockedIp(record.address))) {
+      callback(error ?? new Error("Blocked DNS address"), "", 0);
+      return;
+    }
+    const selected = records.find((record) => !options.family || record.family === options.family);
+    if (!selected) { callback(new Error("No safe DNS address"), "", 0); return; }
+    if (options.all) callback(null, records);
+    else callback(null, selected.address, selected.family);
+  });
+} } });
 
 const USER_AGENT = "MediaDownloader/1.0 (+https://github.com/meetpatel94/Media_downloader)";
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -64,6 +82,7 @@ async function fetchHop(url: URL, options: OpenMediaOptions, timeoutGuard: Retur
 
   try {
     return await fetch(url, {
+      dispatcher: safeAgent,
       method: "GET",
       redirect: "manual",
       cache: "no-store",
@@ -73,7 +92,7 @@ async function fetchHop(url: URL, options: OpenMediaOptions, timeoutGuard: Retur
         accept: "video/*,audio/*,application/octet-stream;q=0.9,*/*;q=0.5",
         "accept-encoding": "identity",
       },
-    });
+    } as RequestInit);
   } catch (error) {
     if (options.signal.aborted) {
       throw new DownloadError("CANCELLED", "The download was cancelled.", { cause: error });
@@ -198,8 +217,8 @@ export async function streamToFile(
   const timer = setTimeout(() => controller.abort(), options.timeoutMs);
 
   nodeStream.on("data", (chunk: Buffer) => {
-    if (firstBytes.length === 0) {
-      firstBytes = new Uint8Array(chunk.subarray(0, 64));
+    if (firstBytes.length < 64) {
+      firstBytes = new Uint8Array(Buffer.concat([Buffer.from(firstBytes), chunk.subarray(0, 64 - firstBytes.length)]));
     }
     size += chunk.length;
 

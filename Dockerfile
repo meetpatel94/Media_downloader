@@ -1,7 +1,6 @@
 # Production image for the media downloader.
 #
-# FFmpeg is installed explicitly because MP3 conversion requires it. Everything
-# else (URL validation, MP4 delivery) works without FFmpeg.
+# FFmpeg and ffprobe are required for conversion and inspection respectively.
 FROM node:22-bookworm-slim AS base
 
 RUN apt-get update \

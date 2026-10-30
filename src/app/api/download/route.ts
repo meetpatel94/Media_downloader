@@ -1,46 +1,17 @@
 import { createReadStream } from "node:fs";
 import type { NextRequest } from "next/server";
-import { downloadMedia } from "@/lib/download-service";
-import { isDownloadError } from "@/lib/errors";
+import { inspectMedia } from "@/lib/media-info";
+import { readBody, errorResponse } from "@/lib/request-body";
+import { DownloadError } from "@/lib/errors";
+import { getConfig } from "@/lib/config";
 import { contentDisposition } from "@/lib/http-response";
-import type { DownloadFormat } from "@/lib/source-handlers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
-const MAX_BODY_BYTES = 8 * 1024;
-
 function jsonError(message: string, status: number, code?: string) {
-  return Response.json(
-    { error: message, ...(code ? { code } : {}) },
-    {
-      status,
-      headers: {
-        "cache-control": "no-store",
-        "x-content-type-options": "nosniff",
-      },
-    },
-  );
-}
-
-function publicMessage(error: unknown): { message: string; status: number; code: string } {
-  if (isDownloadError(error)) {
-    return { message: error.message, status: error.status, code: error.code };
-  }
-
-  return { message: "Download failed. Please try again.", status: 500, code: "INTERNAL" };
-}
-
-function logDiagnostic(error: unknown) {
-  if (isDownloadError(error) && error.diagnostic) {
-    console.error(`[download] ${error.code}:`, error.diagnostic);
-    return;
-  }
-
-  if (error instanceof Error) {
-    console.error(`[download] ${error.name}: ${error.message}`);
-  }
+  return Response.json({ error: message, code }, { status, headers: { "cache-control": "no-store" } });
 }
 
 /**
@@ -50,10 +21,12 @@ function logDiagnostic(error: unknown) {
 function streamArtifact(filePath: string, cleanup: () => Promise<void>, size: number, contentType: string, filename: string, signal: AbortSignal) {
   const nodeStream = createReadStream(filePath);
   let finished = false;
+  const timer = setTimeout(() => { nodeStream.destroy(new Error("Response timed out")); }, getConfig().downloadTimeoutMs);
 
   const cleanupOnce = async () => {
     if (finished) return;
     finished = true;
+    clearTimeout(timer);
     await cleanup();
   };
 
@@ -68,6 +41,7 @@ function streamArtifact(filePath: string, cleanup: () => Promise<void>, size: nu
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       nodeStream.on("data", (chunk: string | Buffer) => {
+        nodeStream.pause();
         controller.enqueue(new Uint8Array(Buffer.from(chunk)));
       });
 
@@ -83,6 +57,8 @@ function streamArtifact(filePath: string, cleanup: () => Promise<void>, size: nu
         void cleanupOnce();
       });
     },
+
+    pull() { nodeStream.resume(); },
 
     async cancel() {
       nodeStream.destroy();
@@ -105,56 +81,14 @@ function streamArtifact(filePath: string, cleanup: () => Promise<void>, size: nu
   });
 }
 
-type RequestBody = { url?: unknown; format?: unknown };
-
 export async function POST(request: NextRequest) {
-  const contentLength = Number(request.headers.get("content-length") ?? "0");
-  if (contentLength > MAX_BODY_BYTES) {
-    return jsonError("Invalid request body.", 400, "INVALID_BODY");
-  }
-
-  let body: RequestBody;
-
   try {
-    const raw = await request.text();
-    if (raw.length > MAX_BODY_BYTES) {
-      return jsonError("Invalid request body.", 400, "INVALID_BODY");
-    }
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return jsonError("Invalid request body.", 400, "INVALID_BODY");
-    }
-    body = parsed as RequestBody;
-  } catch {
-    return jsonError("Invalid request body.", 400, "INVALID_BODY");
-  }
-
-  const format = body.format;
-  if (format !== "mp4" && format !== "mp3") {
-    return jsonError("Unsupported format. Choose MP4 or MP3.", 400, "INVALID_FORMAT");
-  }
-
-  if (typeof body.url !== "string") {
-    return jsonError("Please paste a media URL.", 400, "EMPTY_URL");
-  }
-
-  try {
-    const artifact = await downloadMedia(body.url, format as DownloadFormat, { signal: request.signal });
-
+    const body = await readBody(request);
+    if (typeof body.url !== "string") throw new DownloadError("EMPTY_URL", "Please paste a media URL.");
+    if (typeof body.formatId !== "string" || !body.formatId || (body.outputFormat !== "mp4" && body.outputFormat !== "mp3")) throw new DownloadError("INVALID_FORMAT", "Select an available format after fetching media information.");
+    const { artifact } = await inspectMedia(body.url, request.signal, { id: body.formatId, output: body.outputFormat });
+    if (!artifact) throw new DownloadError("INTERNAL", "Download failed. Please try again.");
     return streamArtifact(artifact.filePath, artifact.cleanup, artifact.size, artifact.contentType, artifact.filename, request.signal);
-  } catch (error) {
-    logDiagnostic(error);
-
-    // A disconnected client cannot receive a JSON body; nothing to send.
-    if (request.signal.aborted) {
-      return new Response(null, { status: 499 });
-    }
-
-    const { message, status, code } = publicMessage(error);
-    return jsonError(message, status, code);
-  }
+  } catch (error) { return errorResponse(error); }
 }
-
-export function GET() {
-  return jsonError("Method not allowed. Use POST.", 405, "METHOD_NOT_ALLOWED");
-}
+export function GET() { return jsonError("Method not allowed. Use POST.", 405, "METHOD_NOT_ALLOWED"); }
