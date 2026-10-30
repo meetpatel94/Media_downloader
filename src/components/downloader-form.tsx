@@ -1,55 +1,91 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
 type DownloadFormat = "mp4" | "mp3";
 type StatusTone = "idle" | "error" | "success" | "loading";
 
-function isValidHttpUrl(value: string) {
+type Status = { tone: StatusTone; message: string };
+
+const IDLE_STATUS: Status = { tone: "idle", message: "" };
+
+function parseHttpUrl(value: string): URL | null {
   try {
     const parsed = new URL(value);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return parsed;
   } catch {
-    return false;
+    return null;
   }
 }
 
-function extractFilename(disposition: string | null, format: DownloadFormat) {
+/** Read the RFC 6266 filename, preferring the UTF-8 encoded variant. */
+export function filenameFromDisposition(disposition: string | null, format: DownloadFormat): string {
   const fallback = `media-download.${format}`;
   if (!disposition) return fallback;
 
-  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
-  if (!match?.[1]) return fallback;
+  const extended = disposition.match(/filename\*\s*=\s*([^;]+)/i);
 
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return match[1];
+  if (extended?.[1]) {
+    const value = extended[1].trim().replace(/^"|"$/g, "");
+    const encoded = value.includes("''") ? value.split("''").slice(1).join("''") : value;
+
+    try {
+      const decoded = decodeURIComponent(encoded);
+      if (decoded.trim()) return decoded.trim();
+    } catch {
+      // fall through to the plain filename
+    }
   }
+
+  const plain = disposition.match(/filename\s*=\s*"([^"]*)"|filename\s*=\s*([^;]+)/i);
+  const candidate = (plain?.[1] ?? plain?.[2] ?? "").trim();
+
+  return candidate || fallback;
 }
+
+function triggerBrowserDownload(blob: Blob, filename: string) {
+  const objectUrl = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+
+  // Give the browser time to start the download before releasing the blob URL.
+  window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 60_000);
+}
+
+const TONE_CLASS: Record<StatusTone, string> = {
+  idle: "text-slate-500",
+  loading: "text-slate-700",
+  success: "text-emerald-700",
+  error: "text-rose-700",
+};
 
 export function DownloaderForm() {
   const [url, setUrl] = useState("");
   const [format, setFormat] = useState<DownloadFormat>("mp4");
-  const [status, setStatus] = useState<{ tone: StatusTone; message: string }>({
-    tone: "idle",
-    message: "",
-  });
+  const [status, setStatus] = useState<Status>(IDLE_STATUS);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const statusClassName = useMemo(() => {
-    switch (status.tone) {
-      case "error":
-        return "text-rose-600";
-      case "success":
-        return "text-emerald-600";
-      default:
-        return "text-slate-600";
-    }
-  }, [status.tone]);
+  const abortRef = useRef<AbortController | null>(null);
+  const inFlightRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
+    if (inFlightRef.current) return;
+
     const trimmedUrl = url.trim();
 
     if (!trimmedUrl) {
@@ -57,79 +93,98 @@ export function DownloaderForm() {
       return;
     }
 
-    if (!isValidHttpUrl(trimmedUrl)) {
-      setStatus({ tone: "error", message: "Please enter a valid URL." });
+    if (!parseHttpUrl(trimmedUrl)) {
+      setStatus({ tone: "error", message: "Please enter a valid http:// or https:// URL." });
       return;
     }
 
+    inFlightRef.current = true;
     setIsSubmitting(true);
-    setStatus({ tone: "loading", message: "Preparing your download..." });
+    setStatus({
+      tone: "loading",
+      message: format === "mp3" ? "Downloading and converting to MP3..." : "Downloading your video...",
+    });
+
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       const response = await fetch("/api/download", {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
+        headers: { "content-type": "application/json", accept: "audio/*,video/*,application/json" },
         body: JSON.stringify({ url: trimmedUrl, format }),
+        signal: controller.signal,
       });
 
-      const contentType = response.headers.get("content-type") ?? "";
+      const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+
       if (!response.ok) {
         if (contentType.includes("application/json")) {
-          const payload = (await response.json()) as { error?: string };
-          throw new Error(payload.error || "Download failed. Please try again.");
+          const payload = (await response.json().catch(() => ({}))) as { error?: unknown };
+          const message = typeof payload.error === "string" ? payload.error : "Download failed. Please try again.";
+          throw new Error(message);
         }
         throw new Error("Download failed. Please try again.");
       }
 
-      if (!contentType.includes("audio/") && !contentType.includes("video/")) {
-        throw new Error("Download failed. Please try again.");
+      if (!contentType.startsWith("audio/") && !contentType.startsWith("video/")) {
+        throw new Error("The server did not return a media file. Please try again.");
       }
 
       const blob = await response.blob();
-      const filename = extractFilename(response.headers.get("content-disposition"), format);
-      const objectUrl = window.URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = objectUrl;
-      anchor.download = filename;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.URL.revokeObjectURL(objectUrl);
 
-      setStatus({ tone: "success", message: "Your download is ready." });
+      if (blob.size === 0) {
+        throw new Error("The server returned an empty file. Please try again.");
+      }
+
+      const filename = filenameFromDisposition(response.headers.get("content-disposition"), format);
+      triggerBrowserDownload(blob, filename);
+
+      setStatus({
+        tone: "success",
+        message: `Download started: ${filename}`,
+      });
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setStatus({ tone: "error", message: "The download was cancelled." });
+        return;
+      }
+
       setStatus({
         tone: "error",
-        message: error instanceof Error ? error.message : "Download failed. Please try again.",
+        message: error instanceof Error && error.message ? error.message : "Download failed. Please try again.",
       });
     } finally {
+      inFlightRef.current = false;
       setIsSubmitting(false);
+      abortRef.current = null;
     }
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-5" noValidate>
+    <form onSubmit={handleSubmit} className="space-y-5 sm:space-y-6" noValidate aria-busy={isSubmitting}>
       <div className="space-y-2">
-        <label htmlFor="media-url" className="text-sm font-medium text-slate-800">
+        <label htmlFor="media-url" className="block text-sm font-medium text-slate-800">
           Media URL
         </label>
         <textarea
           id="media-url"
           name="media-url"
-          rows={5}
+          rows={4}
           value={url}
           onChange={(event) => setUrl(event.target.value)}
-          placeholder="Paste your video or audio URL here..."
-          className="min-h-32 w-full resize-y rounded-2xl border border-slate-200 bg-white px-4 py-3 text-base text-slate-900 shadow-sm outline-none transition focus:border-slate-400 focus:ring-4 focus:ring-slate-200"
+          placeholder="https://example.com/video.mp4"
+          className="block w-full resize-y rounded-2xl border border-slate-300 bg-white px-4 py-3 text-base leading-6 text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus-visible:border-slate-500 focus-visible:ring-4 focus-visible:ring-slate-300 disabled:cursor-not-allowed disabled:bg-slate-100"
           aria-describedby="download-status"
+          autoComplete="off"
+          spellCheck={false}
+          inputMode="url"
           disabled={isSubmitting}
         />
       </div>
 
       <div className="space-y-2">
-        <label htmlFor="format" className="text-sm font-medium text-slate-800">
+        <label htmlFor="format" className="block text-sm font-medium text-slate-800">
           Format
         </label>
         <select
@@ -137,7 +192,7 @@ export function DownloaderForm() {
           name="format"
           value={format}
           onChange={(event) => setFormat(event.target.value as DownloadFormat)}
-          className="h-12 w-full rounded-2xl border border-slate-200 bg-white px-4 text-base text-slate-900 shadow-sm outline-none transition focus:border-slate-400 focus:ring-4 focus:ring-slate-200"
+          className="block h-12 w-full rounded-2xl border border-slate-300 bg-white px-4 text-base text-slate-900 shadow-sm outline-none transition focus-visible:border-slate-500 focus-visible:ring-4 focus-visible:ring-slate-300 disabled:cursor-not-allowed disabled:bg-slate-100"
           disabled={isSubmitting}
         >
           <option value="mp4">MP4 Video</option>
@@ -147,13 +202,29 @@ export function DownloaderForm() {
 
       <button
         type="submit"
-        className="flex h-12 w-full items-center justify-center rounded-2xl bg-slate-950 px-5 text-sm font-semibold text-white transition hover:bg-slate-800 focus:outline-none focus:ring-4 focus:ring-slate-300 disabled:cursor-not-allowed disabled:bg-slate-400"
         disabled={isSubmitting}
+        className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-slate-950 px-5 text-sm font-semibold text-white transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-400/60 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
       >
-        {isSubmitting ? "Downloading..." : "Download"}
+        {isSubmitting ? (
+          <>
+            <span
+              aria-hidden="true"
+              className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+            />
+            Downloading...
+          </>
+        ) : (
+          "Download"
+        )}
       </button>
 
-      <p id="download-status" aria-live="polite" className={`min-h-5 text-sm ${statusClassName}`}>
+      <p
+        id="download-status"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className={`min-h-5 break-words text-sm leading-6 ${TONE_CLASS[status.tone]}`}
+      >
         {status.message}
       </p>
     </form>
