@@ -1,5 +1,5 @@
 {
-  "name": "nextjs-postgresql-template",
+  "name": "media-downloader",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -7,7 +7,8 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test src/lib/*.test.ts"
+    "test": "node --import tsx --test src/lib/*.test.ts src/components/*.test.tsx src/app/api/download/*.test.ts",
+    "test:watch": "node --import tsx --test --watch src/lib/*.test.ts src/components/*.test.tsx"
   },
   "dependencies": {
     "dotenv": "17.3.1",
@@ -15,11 +16,11 @@
     "next": "16.2.6",
     "pg": "8.20.0",
     "react": "19.2.6",
-    "react-dom": "19.2.6",
-    "tsx": "^4.23.15"
+    "react-dom": "19.2.6"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.1.17",
+    "@types/jsdom": "30.0.0",
     "@types/node": "22.19.15",
     "@types/pg": "8.18.0",
     "@types/react": "19.2.14",
@@ -27,8 +28,16 @@
     "drizzle-kit": "0.31.10",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
+    "jsdom": "30.1.3",
     "postcss": "8.5.8",
     "tailwindcss": "4.1.17",
+    "tsx": "^4.23.15",
     "typescript": "5.9.3"
+  },
+  "optionalDependencies": {
+    "@ffmpeg-installer/ffmpeg": "1.1.0"
+  },
+  "engines": {
+    "node": ">=20.9"
   }
 }

@@ -1,102 +1,161 @@
+/**
+ * URL validation and SSRF protection.
+ *
+ * `validateMediaUrl` is synchronous and pure: syntax, protocol, credentials,
+ * blocked hostnames and the source allowlist. Any DNS work happens in
+ * `assertSafeRemoteHost`, which must be called for *every* hop (initial URL and
+ * every redirect) immediately before the request is issued.
+ */
+
 import { promises as dns } from "node:dns";
-import net from "node:net";
+import { isBlockedHostname, isBlockedIp } from "@/lib/ip";
+import { DownloadError, type DownloadErrorCode } from "@/lib/errors";
+import { classifySource, getSupportedHosts, MESSAGES, type ClassifiedSource } from "@/lib/sources";
 
-const MAX_URL_LENGTH = 2048;
-const ALLOWED_HOSTS = new Set([
-  "samplelib.com",
-  "www.samplelib.com",
-  "file-examples.com",
-  "www.file-examples.com",
-  "sample-videos.com",
-  "www.sample-videos.com",
-]);
+export const MAX_URL_LENGTH = 2048;
 
-const PRIVATE_IPV4_RANGES: Array<[string, string]> = [
-  ["10.0.0.0", "10.255.255.255"],
-  ["127.0.0.0", "127.255.255.255"],
-  ["169.254.0.0", "169.254.255.255"],
-  ["172.16.0.0", "172.31.255.255"],
-  ["192.168.0.0", "192.168.255.255"],
-];
+export type UrlValidationResult =
+  | { ok: true; url: URL; source: ClassifiedSource }
+  | { ok: false; code: DownloadErrorCode; message: string };
 
-function ipv4ToInt(ip: string) {
-  return ip.split(".").reduce((acc, octet) => (acc << 8) + Number(octet), 0) >>> 0;
-}
+export function validateMediaUrl(rawUrl: string): UrlValidationResult {
+  const value = (rawUrl ?? "").trim();
 
-function isPrivateIpv4(ip: string) {
-  if (ip === "0.0.0.0") return true;
-  const value = ipv4ToInt(ip);
-  return PRIVATE_IPV4_RANGES.some(([start, end]) => value >= ipv4ToInt(start) && value <= ipv4ToInt(end));
-}
-
-function isBlockedIp(ip: string) {
-  if (net.isIPv4(ip)) return isPrivateIpv4(ip);
-  if (net.isIPv6(ip)) {
-    const normalized = ip.toLowerCase();
-    return (
-      normalized === "::1" ||
-      normalized === "::" ||
-      normalized.startsWith("fc") ||
-      normalized.startsWith("fd") ||
-      normalized.startsWith("fe80")
-    );
-  }
-  return true;
-}
-
-export function validateMediaUrl(rawUrl: string) {
-  const url = rawUrl.trim();
-
-  if (!url) {
-    return { ok: false as const, message: "Please paste a media URL." };
+  if (!value) {
+    return { ok: false, code: "EMPTY_URL", message: "Please paste a media URL." };
   }
 
-  if (url.length > MAX_URL_LENGTH) {
-    return { ok: false as const, message: "Please enter a valid URL." };
+  if (value.length > MAX_URL_LENGTH) {
+    return { ok: false, code: "URL_TOO_LONG", message: "That URL is too long. Please use a link shorter than 2048 characters." };
   }
 
   let parsed: URL;
 
   try {
-    parsed = new URL(url);
+    parsed = new URL(value);
   } catch {
-    return { ok: false as const, message: "Please enter a valid URL." };
+    return { ok: false, code: "INVALID_URL", message: "Please enter a valid URL, including https://." };
   }
 
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    return { ok: false as const, message: "Please enter a valid URL." };
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { ok: false, code: "INVALID_URL", message: "Only http:// and https:// URLs are supported." };
   }
 
-  const hostname = parsed.hostname.toLowerCase();
-
-  if (!ALLOWED_HOSTS.has(hostname)) {
-    return { ok: false as const, message: "This media source is not supported." };
+  if (parsed.username || parsed.password) {
+    return { ok: false, code: "UNSAFE_URL", message: "URLs containing credentials are not allowed." };
   }
 
-  return { ok: true as const, url: parsed };
+  if (parsed.port && parsed.port !== "80" && parsed.port !== "443") {
+    return { ok: false, code: "UNSAFE_URL", message: "Only the standard HTTP and HTTPS ports are supported." };
+  }
+
+  if (isBlockedHostname(parsed.hostname)) {
+    return { ok: false, code: "UNSAFE_URL", message: "This URL is not allowed." };
+  }
+
+  const classification = classifySource(parsed);
+
+  if (!classification.ok) {
+    return {
+      ok: false,
+      code: classification.reason === "unsupported-source" ? "UNSUPPORTED_SOURCE" : "NOT_MEDIA",
+      message: classification.message,
+    };
+  }
+
+  return { ok: true, url: parsed, source: classification.source };
 }
 
-export async function ensurePublicRemoteHost(url: URL) {
-  const records = await dns.lookup(url.hostname, { all: true });
+export type HostLookup = (hostname: string) => Promise<Array<{ address: string }>>;
 
-  if (!records.length) {
-    throw new Error("The media could not be accessed.");
+const defaultLookup: HostLookup = (hostname) => dns.lookup(hostname, { all: true, verbatim: true });
+
+let hostLookup: HostLookup = defaultLookup;
+
+/**
+ * Test hook: replace the DNS resolver used by SSRF checks.
+ * Only the resolver is swappable — the host allowlist and private-range rules
+ * are never affected. Not reachable from any HTTP surface.
+ */
+export function setHostLookupForTests(lookup: HostLookup | null): void {
+  hostLookup = lookup ?? defaultLookup;
+}
+
+/**
+ * Resolve the host and reject the request if any answer is a private,
+ * loopback, link-local, metadata, or otherwise reserved address.
+ *
+ * The check happens immediately before connecting, which limits (but cannot by
+ * itself eliminate) DNS-rebinding windows; redirects are re-validated hop by
+ * hop in `assertAllowedRedirect`.
+ */
+export async function assertSafeRemoteHost(url: URL): Promise<void> {
+  const hostname = url.hostname.replace(/^\[/, "").replace(/\]$/, "");
+
+  if (isBlockedHostname(hostname)) {
+    throw new DownloadError("UNSAFE_URL", "This URL is not allowed.");
+  }
+
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) || hostname.includes(":")) {
+    if (isBlockedIp(hostname)) {
+      throw new DownloadError("UNSAFE_URL", "This URL is not allowed.");
+    }
+    return;
+  }
+
+  let records: Array<{ address: string }>;
+
+  try {
+    records = await hostLookup(hostname);
+  } catch {
+    throw new DownloadError("UPSTREAM_ERROR", "The media could not be reached. The host did not resolve.");
+  }
+
+  if (records.length === 0) {
+    throw new DownloadError("UPSTREAM_ERROR", "The media could not be reached. The host did not resolve.");
   }
 
   for (const record of records) {
     if (isBlockedIp(record.address)) {
-      throw new Error("This media source is not supported.");
+      throw new DownloadError("UNSAFE_URL", "This URL resolves to a blocked address.");
     }
   }
 }
 
-export function isAllowedRedirect(location: string) {
+/**
+ * Validate one redirect hop. Resolves `location` against the current URL and
+ * requires the result to be a supported, non-internal direct media URL.
+ */
+export function resolveAllowedRedirect(location: string, current: URL): URL {
+  let target: URL;
+
   try {
-    const target = new URL(location);
-    return ["http:", "https:"].includes(target.protocol) && ALLOWED_HOSTS.has(target.hostname.toLowerCase());
+    target = new URL(location, current);
+  } catch {
+    throw new DownloadError("SOURCE_NOT_PERMITTED", MESSAGES.unsupportedSource);
+  }
+
+  const validated = validateMediaUrl(target.toString());
+
+  if (!validated.ok) {
+    throw new DownloadError(validated.code, validated.message === MESSAGES.notAMediaUrl ? MESSAGES.unsupportedSource : validated.message);
+  }
+
+  if (validated.source.kind !== "direct") {
+    throw new DownloadError("SOURCE_NOT_PERMITTED", MESSAGES.unsupportedSource);
+  }
+
+  return validated.url;
+}
+
+/** Backwards-compatible boolean helper. */
+export function isAllowedRedirect(location: string, current?: URL): boolean {
+  try {
+    resolveAllowedRedirect(location, current ?? new URL("https://samplelib.com/"));
+    return true;
   } catch {
     return false;
   }
 }
 
-export const SUPPORTED_HOSTS = Array.from(ALLOWED_HOSTS).sort();
+export const SUPPORTED_HOSTS = getSupportedHosts();
