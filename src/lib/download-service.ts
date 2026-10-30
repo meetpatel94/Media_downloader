@@ -1,33 +1,38 @@
 /**
  * Download pipeline.
  *
- * url validation -> source handler (streamed to a temp file with a byte cap)
- * -> format processing (MP4 package / MP3 transcode) -> verified temp file
- * -> single-use cleanup.
+ * url validation -> capability check -> source handler (streamed to a temp file
+ * with a byte cap) -> format processing (passthrough / MP3 / MP4) -> verified
+ * temp file -> single-use cleanup.
  *
- * Nothing is buffered in memory, every step is bounded by timeouts, and the
- * temp directory is always removed by the caller via `cleanup()`.
+ * `inspectMedia` (used by both API routes) builds on the same primitives; this
+ * module is the lower-level entry point that is also exercised directly by the
+ * test suite.
  */
 
-import { randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { mkdtemp, open, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfig } from "@/lib/config";
 import { acquireSlot } from "@/lib/concurrency";
 import { DownloadError } from "@/lib/errors";
-import { convertToMp3, convertToMp4, getFfmpegStatus } from "@/lib/ffmpeg";
 import {
-  containerKind,
-  isConvertible,
-  isMp3Audio,
-  isMp4CompatibleVideo,
-  sniffContainer,
-  type Container,
-} from "@/lib/media-inspect";
-import { getSourceHandler, type DownloadFormat } from "@/lib/source-handlers";
+  defaultMp3Bitrate,
+  type FormatSpec,
+  type OutputContainer,
+} from "@/lib/formats";
+import {
+  createArtifactStream,
+  filenameForUrl,
+  produceOutput,
+  sniffedContainerFor,
+  type ProducedOutput,
+} from "@/lib/media-processing";
+import { containerKind, type Container } from "@/lib/media-inspect";
+import { getSourceHandler } from "@/lib/source-handlers";
 import { validateMediaUrl } from "@/lib/download-validation";
+
+export { createArtifactStream, filenameForUrl, sanitizeFilename } from "@/lib/media-processing";
 
 export type DownloadArtifact = {
   filePath: string;
@@ -37,135 +42,31 @@ export type DownloadArtifact = {
   cleanup: () => Promise<void>;
 };
 
-function sanitizeFilename(input: string): string {
-  const cleaned = input
-    .normalize("NFKD")
-    .replace(/[^a-zA-Z0-9._-]+/g, "-")
-    .replace(/-{2,}/g, "-")
-    .replace(/^[-_.]+|[-_.]+$/g, "")
-    .slice(0, 80);
-
-  return cleaned || "media-download";
-}
-
-export function filenameForUrl(url: URL, format: DownloadFormat): string {
-  const segments = url.pathname.split("/").filter(Boolean);
-  const last = segments.pop() ?? "";
-
-  let decoded = last;
-  try {
-    decoded = decodeURIComponent(last);
-  } catch {
-    decoded = last;
+/** Decide how a source container becomes the requested output. */
+function specFor(container: Container, format: OutputContainer): FormatSpec {
+  if (sniffedContainerFor(format) === container) {
+    return { kind: "original", container: format };
   }
 
-  const base = decoded.replace(/\.[a-zA-Z0-9]{1,5}$/, "");
-  return `${sanitizeFilename(base)}.${format}`;
-}
+  const kind = containerKind(container);
 
-async function assertFileSize(filePath: string, maxBytes: number): Promise<number> {
-  const stats = await stat(filePath);
-
-  if (!stats.isFile() || stats.size === 0) {
-    throw new DownloadError("UPSTREAM_ERROR", "The media file is empty.");
-  }
-
-  if (stats.size > maxBytes) {
-    throw new DownloadError("TOO_LARGE", "The media file is too large to download.");
-  }
-
-  return stats.size;
-}
-
-/** Sniff the first 64 bytes of a file without reading it into memory. */
-async function sniffFile(filePath: string): Promise<Container> {
-  const handle = await open(filePath, "r");
-
-  try {
-    const buffer = Buffer.alloc(64);
-    const { bytesRead } = await handle.read(buffer, 0, 64, 0);
-    return sniffContainer(buffer.subarray(0, bytesRead));
-  } finally {
-    await handle.close();
-  }
-}
-
-async function verifyContainer(filePath: string, expected: Container[], mismatch: DownloadError): Promise<void> {
-  const container = await sniffFile(filePath);
-
-  if (!expected.includes(container)) {
-    throw mismatch;
-  }
-}
-
-async function processMp4(
-  sourcePath: string,
-  container: Container,
-  workDir: string,
-  signal: AbortSignal,
-): Promise<string> {
-  const config = getConfig();
-
-  if (containerKind(container) === "audio") {
+  if (kind === "audio" && (format === "mp4" || format === "webm")) {
     throw new DownloadError("FORMAT_UNAVAILABLE", "This source contains audio only. Choose MP3 instead.");
   }
 
-  if (isMp4CompatibleVideo(container)) {
-    return sourcePath;
+  if (kind === "unknown") {
+    throw new DownloadError("FORMAT_UNAVAILABLE", "That output format cannot be produced for this source.");
   }
 
-  if (!isConvertible(container)) {
-    throw new DownloadError("FORMAT_UNAVAILABLE", "This video is not available in MP4 format.");
+  if (format === "mp3") {
+    return { kind: "transcode", container: "mp3", bitrateKbps: defaultMp3Bitrate() };
   }
 
-  const outputPath = join(workDir, `output-${randomUUID()}.mp4`);
-  await convertToMp4(sourcePath, outputPath, { signal, timeoutMs: config.conversionTimeoutMs });
-
-  await verifyContainer(
-    outputPath,
-    ["mp4"],
-    new DownloadError("CONVERSION_FAILED", "The converted file was not a valid MP4 video."),
-  );
-
-  await assertFileSize(outputPath, config.maxFileSizeBytes);
-  return outputPath;
-}
-
-async function processMp3(
-  sourcePath: string,
-  container: Container,
-  workDir: string,
-  signal: AbortSignal,
-): Promise<string> {
-  const config = getConfig();
-
-  if (isMp3Audio(container)) {
-    return sourcePath;
+  if (format === "mp4") {
+    return { kind: "transcode", container: "mp4" };
   }
 
-  if (!isConvertible(container)) {
-    throw new DownloadError("FORMAT_UNAVAILABLE", "Audio could not be extracted from this source.");
-  }
-
-  const status = await getFfmpegStatus();
-  if (!status.available) {
-    throw new DownloadError(
-      "CONVERSION_UNAVAILABLE",
-      "MP3 conversion is not available on this server because FFmpeg is not installed.",
-    );
-  }
-
-  const outputPath = join(workDir, `output-${randomUUID()}.mp3`);
-  await convertToMp3(sourcePath, outputPath, { signal, timeoutMs: config.conversionTimeoutMs });
-
-  await verifyContainer(
-    outputPath,
-    ["mp3"],
-    new DownloadError("CONVERSION_FAILED", "The converted file was not valid MP3 audio."),
-  );
-
-  await assertFileSize(outputPath, config.maxFileSizeBytes);
-  return outputPath;
+  throw new DownloadError("FORMAT_UNAVAILABLE", "That output format cannot be produced for this source.");
 }
 
 /**
@@ -176,18 +77,28 @@ async function processMp3(
  */
 export async function downloadMedia(
   rawUrl: string,
-  format: DownloadFormat,
+  format: OutputContainer,
   options: { signal?: AbortSignal } = {},
 ): Promise<DownloadArtifact> {
   const config = getConfig();
   const signal = options.signal ?? new AbortController().signal;
 
   const validation = validateMediaUrl(rawUrl);
+
   if (!validation.ok) {
     throw new DownloadError(validation.code, validation.message);
   }
 
   const handler = getSourceHandler(validation.source);
+  const capabilities = handler.capabilities();
+
+  if (!capabilities.download.supported) {
+    throw new DownloadError(
+      "UNSUPPORTED_SOURCE",
+      capabilities.download.reason ?? "This source cannot be downloaded by this deployment.",
+    );
+  }
+
   const slot = await acquireSlot(signal);
   const workDir = await mkdtemp(join(tmpdir(), "media-downloader-"));
 
@@ -210,35 +121,36 @@ export async function downloadMedia(
       workDir,
     });
 
-    const filePath =
-      format === "mp4"
-        ? await processMp4(result.sourcePath, result.container, workDir, signal)
-        : await processMp3(result.sourcePath, result.container, workDir, signal);
+    const produced: ProducedOutput = await produceOutput({
+      sourcePath: result.sourcePath,
+      sourceContainer: result.container,
+      spec: specFor(result.container, format),
+      workDir,
+      signal,
+    });
 
-    const size = await assertFileSize(filePath, config.maxFileSizeBytes);
-    const filename = filenameForUrl(result.finalUrl, format);
+    const filename = filenameForUrl(result.finalUrl, produced.container);
+    const size = produced.size;
+
+    if (size > config.maxFileSizeBytes) {
+      throw new DownloadError("TOO_LARGE", "The media file is too large to download.");
+    }
 
     handedOff = true;
 
     return {
-      filePath,
+      filePath: produced.filePath,
       filename,
-      contentType: format === "mp4" ? "video/mp4" : "audio/mpeg",
+      contentType: produced.contentType,
       size,
       cleanup,
     };
-  } catch (error) {
-    throw error;
   } finally {
     slot.release();
+
     if (!handedOff) {
       // Defensive: ensure nothing is left behind on early exits.
       await cleanup();
     }
   }
-}
-
-/** Exposed for streamed responses. */
-export function createArtifactStream(filePath: string) {
-  return createReadStream(filePath);
 }

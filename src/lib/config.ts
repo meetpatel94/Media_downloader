@@ -31,6 +31,15 @@ function readHostList(name: string): string[] {
     .slice(0, 50);
 }
 
+export type SourcePolicy = "allowlist" | "public";
+
+function readSourcePolicy(): SourcePolicy {
+  const raw = process.env.MEDIA_DOWNLOADER_SOURCE_POLICY?.trim().toLowerCase();
+
+  // Anything except an explicit opt-in keeps the conservative allowlist.
+  return raw === "public" ? "public" : "allowlist";
+}
+
 export type AppConfig = {
   /** Hard cap for a single downloaded/converted file. */
   maxFileSizeBytes: number;
@@ -50,6 +59,16 @@ export type AppConfig = {
   mp3Bitrate: string;
   /** Additional explicitly supported direct-media hosts. */
   extraHosts: string[];
+  /**
+   * `allowlist` (default) only fetches the curated direct-media hosts.
+   * `public` also accepts any other public http(s) host, still subject to the
+   * SSRF, redirect, size and content-verification rules.
+   */
+  sourcePolicy: SourcePolicy;
+  /** Whether YouTube metadata may be fetched (oEmbed / Data API). */
+  youtubeMetadata: boolean;
+  /** Optional YouTube Data API v3 key; enables richer metadata. */
+  youtubeApiKey: string | null;
   /** Absolute path to an FFmpeg binary (optional). */
   ffmpegPath: string | null;
 };
@@ -65,6 +84,9 @@ export function getConfig(): AppConfig {
     maxRedirects: readInt("MEDIA_DOWNLOADER_MAX_REDIRECTS", 5, 0, 10),
     mp3Bitrate: process.env.MEDIA_DOWNLOADER_MP3_BITRATE?.trim() || "192k",
     extraHosts: readHostList("MEDIA_DOWNLOADER_EXTRA_HOSTS"),
+    sourcePolicy: readSourcePolicy(),
+    youtubeMetadata: !/^(0|false|off|disabled|no)$/i.test(process.env.MEDIA_DOWNLOADER_YOUTUBE_METADATA?.trim() ?? ""),
+    youtubeApiKey: process.env.YOUTUBE_API_KEY?.trim() || null,
     ffmpegPath: process.env.FFMPEG_PATH?.trim() || null,
   };
 }

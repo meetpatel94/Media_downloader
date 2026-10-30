@@ -56,6 +56,19 @@ const WILDCARD_HOSTS = [
 
 export type SourceKind = "direct" | "platform";
 
+/**
+ * Explicit source policy for direct media.
+ *
+ * - `allowlist` – only the curated hosts below (plus `MEDIA_DOWNLOADER_EXTRA_HOSTS`).
+ * - `public`    – any other public http(s) host is accepted, but every address
+ *                 is still resolved and checked for private/loopback/link-local
+ *                 ranges, redirects are re-validated, and the response bytes are
+ *                 verified as media before anything is served.
+ */
+export function directSourcePolicy(): "allowlist" | "public" {
+  return getConfig().sourcePolicy;
+}
+
 export type ClassifiedSource = {
   kind: SourceKind;
   host: string;
@@ -74,15 +87,25 @@ export type SourceClassification =
   | { ok: true; source: ClassifiedSource }
   | { ok: false; reason: "unsupported-source" | "not-a-media-url"; message: string };
 
-const PLATFORM_NOT_SUPPORTED_MESSAGE =
-  "YouTube links cannot be downloaded: this deployment has no permitted YouTube extractor configured. " +
-  "Paste a direct media file URL (.mp4, .webm, .m4a, .mp3) instead.";
+/**
+ * Two distinct platform limitations. Metadata and media download are separate
+ * capabilities, so they get separate, accurate messages.
+ */
+const YOUTUBE_DOWNLOAD_NOT_SUPPORTED =
+  "YouTube media files cannot be downloaded by this deployment: YouTube's official APIs provide metadata only and " +
+  "do not permit retrieving the video or audio streams, and no licensed download integration is configured. " +
+  "Use Fetch Info for the video's metadata, or paste a direct media file URL (.mp4, .webm, .m4a, .mp3).";
+
+const YOUTUBE_METADATA_NOT_SUPPORTED =
+  "YouTube metadata lookup is disabled on this deployment. Paste a direct media file URL (.mp4, .webm, .m4a, .mp3), " +
+  "or enable MEDIA_DOWNLOADER_YOUTUBE_METADATA to allow official YouTube metadata lookups.";
 
 export const MESSAGES = {
   unsupportedSource: "This media source is not supported. Only direct media file URLs from approved hosts are supported.",
   notAMediaUrl:
     "This URL points to a web page, not a media file. Paste a direct link ending in .mp4, .webm, .m4a, or .mp3.",
-  platformNotSupported: PLATFORM_NOT_SUPPORTED_MESSAGE,
+  platformDownloadNotSupported: YOUTUBE_DOWNLOAD_NOT_SUPPORTED,
+  platformMetadataNotSupported: YOUTUBE_METADATA_NOT_SUPPORTED,
 } as const;
 
 function normalizeHost(hostname: string): string {
@@ -104,7 +127,9 @@ export function isAllowedDirectHost(hostname: string): boolean {
     if (host.endsWith(`.${entry}`)) return true;
   }
 
-  return false;
+  // Explicit opt-in: any public host. Private addresses are still rejected by
+  // `assertSafeRemoteHost` immediately before each connection.
+  return directSourcePolicy() === "public";
 }
 
 export function isPlatformHost(hostname: string): boolean {

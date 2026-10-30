@@ -195,6 +195,99 @@ export async function openRemoteMedia(input: URL, options: OpenMediaOptions): Pr
   }
 }
 
+export type JsonFetchResult = {
+  /** Upstream HTTP status. */
+  status: number;
+  ok: boolean;
+  /** Parsed JSON body, or `null` when the body was empty / not JSON. */
+  data: unknown;
+};
+
+/**
+ * Fetch a small JSON document from a *fixed, pre-approved* endpoint.
+ *
+ * Used for platform metadata APIs only. The caller is responsible for deciding
+ * which URL is requested (never user-controlled beyond a validated id); this
+ * helper adds the same SSRF checks, deadline, no-redirect rule and byte cap as
+ * the media downloader, so a compromised upstream cannot stream unbounded data
+ * into the process.
+ */
+export async function fetchJsonLimited(
+  input: URL,
+  options: { signal: AbortSignal; timeoutMs?: number; maxBytes?: number },
+): Promise<JsonFetchResult> {
+  const config = getConfig();
+  const maxBytes = options.maxBytes ?? 64 * 1024;
+  const guard = headerTimeoutSignal(options.signal, options.timeoutMs ?? Math.min(config.requestTimeoutMs, 10_000));
+
+  try {
+    await assertSafeRemoteHost(input);
+
+    let response: Response;
+
+    try {
+      response = await fetch(input, {
+        dispatcher: safeAgent,
+        method: "GET",
+        redirect: "manual",
+        cache: "no-store",
+        signal: guard.signal,
+        headers: { "user-agent": USER_AGENT, accept: "application/json" },
+      } as RequestInit);
+    } catch (error) {
+      if (options.signal.aborted) {
+        throw new DownloadError("CANCELLED", "The request was cancelled.", { cause: error });
+      }
+      if (guard.didTimeout()) {
+        throw new DownloadError("UPSTREAM_TIMEOUT", "The metadata service took too long to respond.", { cause: error });
+      }
+      throw new DownloadError("UPSTREAM_ERROR", "The metadata service could not be reached.", { cause: error });
+    }
+
+    if (REDIRECT_STATUSES.has(response.status)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new DownloadError("UPSTREAM_ERROR", "The metadata service returned an unexpected redirect.");
+    }
+
+    if (!response.body) return { status: response.status, ok: response.ok, data: null };
+
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+
+        if (size > maxBytes) {
+          await reader.cancel().catch(() => undefined);
+          throw new DownloadError("UPSTREAM_ERROR", "The metadata response was too large.");
+        }
+
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    let data: unknown = null;
+
+    try {
+      data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      if (response.ok) {
+        throw new DownloadError("UPSTREAM_ERROR", "The metadata service returned an invalid response.");
+      }
+    }
+
+    return { status: response.status, ok: response.ok, data };
+  } finally {
+    guard.cancel();
+  }
+}
+
 export type StreamToFileResult = { size: number; firstBytes: Uint8Array };
 
 /**

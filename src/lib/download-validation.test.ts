@@ -225,3 +225,30 @@ test("assertSafeRemoteHost blocks literal private IPs without consulting DNS", a
     setHostLookupForTests(null);
   }
 });
+
+test("the opt-in public policy accepts unlisted public hosts but still blocks internal addresses", async () => {
+  const previous = process.env.MEDIA_DOWNLOADER_SOURCE_POLICY;
+  process.env.MEDIA_DOWNLOADER_SOURCE_POLICY = "public";
+
+  try {
+    const accepted = validateMediaUrl("https://example.com/video.mp4");
+    assert.equal(accepted.ok, true);
+    if (accepted.ok) assert.equal(accepted.source.kind, "direct");
+
+    for (const url of [
+      "http://127.0.0.1/file.mp4",
+      "http://169.254.169.254/latest/meta-data/",
+      "http://[::1]/file.mp4",
+      "http://localhost/file.mp4",
+      "file:///etc/passwd",
+    ]) {
+      assert.equal(validateMediaUrl(url).ok, false, url);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.MEDIA_DOWNLOADER_SOURCE_POLICY;
+    else process.env.MEDIA_DOWNLOADER_SOURCE_POLICY = previous;
+  }
+
+  // Default policy is restored.
+  assert.equal(validateMediaUrl("https://example.com/video.mp4").ok, false);
+});

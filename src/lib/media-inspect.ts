@@ -83,18 +83,3 @@ export function containerKind(container: Container): MediaKind {
       return "unknown";
   }
 }
-
-/** True when the sniffed container can be turned into MP4 video without a re-encode. */
-export function isMp4CompatibleVideo(container: Container): boolean {
-  return container === "mp4";
-}
-
-/** True when the sniffed container is already MP3 audio. */
-export function isMp3Audio(container: Container): boolean {
-  return container === "mp3";
-}
-
-/** Containers FFmpeg can read from a local file. */
-export function isConvertible(container: Container): boolean {
-  return ["mp4", "webm", "mpeg-ts", "mp3", "ogg", "wav", "flac", "aac"].includes(container);
-}

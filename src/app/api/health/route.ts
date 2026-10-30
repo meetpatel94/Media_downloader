@@ -1,8 +1,9 @@
-import { isFfprobeAvailable } from "@/lib/media-info";
+import { isFfprobeAvailable } from "@/lib/media-processing";
 import { getConfig } from "@/lib/config";
 import { getFfmpegStatus } from "@/lib/ffmpeg";
 import { getConcurrencySnapshot } from "@/lib/concurrency";
 import { listSourceHandlers } from "@/lib/source-handlers";
+import { youTubeCapability } from "@/lib/platform";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,6 +26,8 @@ export async function GET() {
       ready: ffprobe,
       capabilities: {
         mp4: ffprobe,
+        webm: ffprobe,
+        m4a: ffprobe,
         mp3: ffprobe && ffmpeg.available,
         ffprobe: { available: ffprobe },
         ffmpeg: {
@@ -33,6 +36,10 @@ export async function GET() {
           version: ffmpeg.version,
           detail: ffmpeg.reason,
         },
+      },
+      policy: {
+        sourcePolicy: config.sourcePolicy,
+        youtubeMetadata: youTubeCapability(),
       },
       limits: {
         maxFileSizeMb: Math.round(config.maxFileSizeBytes / (1024 * 1024)),

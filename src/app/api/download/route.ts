@@ -1,27 +1,36 @@
 import { createReadStream } from "node:fs";
 import type { NextRequest } from "next/server";
 import { inspectMedia } from "@/lib/media-info";
-import { readBody, errorResponse } from "@/lib/request-body";
+import { readBody, errorResponse, errorPayload } from "@/lib/request-body";
 import { DownloadError } from "@/lib/errors";
 import { getConfig } from "@/lib/config";
 import { contentDisposition } from "@/lib/http-response";
+import { decodeFormatId, isOutputContainer, type OutputContainer } from "@/lib/formats";
+import { MAX_URL_LENGTH } from "@/lib/download-validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
-function jsonError(message: string, status: number, code?: string) {
-  return Response.json({ error: message, code }, { status, headers: { "cache-control": "no-store" } });
-}
+const NO_STORE = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
 
 /**
  * Stream a finished temp file to the client and always remove the temp
  * directory afterwards (success, error, timeout, or client disconnect).
  */
-function streamArtifact(filePath: string, cleanup: () => Promise<void>, size: number, contentType: string, filename: string, signal: AbortSignal) {
+function streamArtifact(
+  filePath: string,
+  cleanup: () => Promise<void>,
+  size: number,
+  contentType: string,
+  filename: string,
+  signal: AbortSignal,
+) {
   const nodeStream = createReadStream(filePath);
   let finished = false;
-  const timer = setTimeout(() => { nodeStream.destroy(new Error("Response timed out")); }, getConfig().downloadTimeoutMs);
+  const timer = setTimeout(() => {
+    nodeStream.destroy(new Error("Response timed out"));
+  }, getConfig().downloadTimeoutMs);
 
   const cleanupOnce = async () => {
     if (finished) return;
@@ -57,7 +66,9 @@ function streamArtifact(filePath: string, cleanup: () => Promise<void>, size: nu
       });
     },
 
-    pull() { nodeStream.resume(); },
+    pull() {
+      nodeStream.resume();
+    },
 
     async cancel() {
       nodeStream.destroy();
@@ -80,14 +91,64 @@ function streamArtifact(filePath: string, cleanup: () => Promise<void>, size: nu
   });
 }
 
+/**
+ * Download a previously inspected format.
+ *
+ * The client's `formatId` is only a hint: `inspectMedia` re-downloads, re-probes
+ * and re-hashes the source, rebuilds the format list, and rejects any id that is
+ * not in it (fabricated, stale, or from a different file).
+ */
 export async function POST(request: NextRequest) {
   try {
     const body = await readBody(request);
-    if (typeof body.url !== "string") throw new DownloadError("EMPTY_URL", "Please paste a media URL.");
-    if (typeof body.formatId !== "string" || !body.formatId || (body.outputFormat !== "mp4" && body.outputFormat !== "mp3")) throw new DownloadError("INVALID_FORMAT", "Select an available format after fetching media information.");
-    const { artifact } = await inspectMedia(body.url, request.signal, { id: body.formatId, output: body.outputFormat });
-    if (!artifact) throw new DownloadError("INTERNAL", "Download failed. Please try again.");
-    return streamArtifact(artifact.filePath, artifact.cleanup, artifact.size, artifact.contentType, artifact.filename, request.signal);
-  } catch (error) { return errorResponse(error); }
+
+    if (typeof body.url !== "string") {
+      throw new DownloadError("EMPTY_URL", "Please paste a media URL.");
+    }
+
+    if (body.url.length > MAX_URL_LENGTH) {
+      throw new DownloadError("URL_TOO_LONG", "That URL is too long. Please use a link shorter than 2048 characters.");
+    }
+
+    if (!isOutputContainer(body.outputFormat)) {
+      throw new DownloadError("INVALID_FORMAT", "Select an available format after fetching media information.");
+    }
+
+    if (typeof body.formatId !== "string" || !body.formatId) {
+      throw new DownloadError("INVALID_FORMAT", "Select an available format after fetching media information.");
+    }
+
+    const decoded = decodeFormatId(body.formatId);
+
+    if (!decoded || decoded.spec.container !== (body.outputFormat as OutputContainer)) {
+      throw new DownloadError("INVALID_FORMAT", "That format is not valid. Fetch media information and choose an available format.");
+    }
+
+    const { artifact } = await inspectMedia(body.url, request.signal, {
+      id: body.formatId,
+      output: body.outputFormat,
+    });
+
+    if (!artifact) {
+      throw new DownloadError("INTERNAL", "The download could not be prepared. Please try again.");
+    }
+
+    return streamArtifact(
+      artifact.filePath,
+      artifact.cleanup,
+      artifact.size,
+      artifact.contentType,
+      artifact.filename,
+      request.signal,
+    );
+  } catch (error) {
+    return errorResponse(error);
+  }
 }
-export function GET() { return jsonError("Method not allowed. Use POST.", 405, "METHOD_NOT_ALLOWED"); }
+
+export function GET() {
+  return Response.json(
+    { success: false, ...errorPayload("Method not allowed. Use POST.", 405, "METHOD_NOT_ALLOWED") },
+    { status: 405, headers: { ...NO_STORE, allow: "POST" } },
+  );
+}
