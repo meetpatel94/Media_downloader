@@ -300,3 +300,11 @@ test("streamToFile writes the stream and returns the sniffer bytes", async () =>
     dns();
   }
 });
+
+test("header deadline includes a stalled DNS lookup", async () => {
+  const { setHostLookupForTests } = await import("@/lib/download-validation");
+  setHostLookupForTests(() => new Promise(() => {}));
+  try {
+    await assert.rejects(openRemoteMedia(new URL(MEDIA_URL), { signal: new AbortController().signal, headerTimeoutMs: 50 }), (error: unknown) => error instanceof DownloadError && error.code === "UPSTREAM_TIMEOUT");
+  } finally { setHostLookupForTests(null); }
+});

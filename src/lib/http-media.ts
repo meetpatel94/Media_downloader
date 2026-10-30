@@ -77,10 +77,16 @@ function headerTimeoutSignal(
 }
 
 async function fetchHop(url: URL, options: OpenMediaOptions, timeoutGuard: ReturnType<typeof headerTimeoutSignal>) {
-  // Re-check DNS for the exact hop we are about to contact.
-  await assertSafeRemoteHost(url);
-
   try {
+    // DNS is included in the header deadline, even if the resolver stalls.
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => { timeoutGuard.signal.removeEventListener("abort", abort); reject(new Error("DNS lookup cancelled")); };
+      if (timeoutGuard.signal.aborted) { abort(); return; }
+      timeoutGuard.signal.addEventListener("abort", abort, { once: true });
+      assertSafeRemoteHost(url).then(resolve, reject).finally(() => {
+        timeoutGuard.signal.removeEventListener("abort", abort);
+      });
+    });
     return await fetch(url, {
       dispatcher: safeAgent,
       method: "GET",
@@ -100,6 +106,7 @@ async function fetchHop(url: URL, options: OpenMediaOptions, timeoutGuard: Retur
     if (timeoutGuard.didTimeout()) {
       throw new DownloadError("UPSTREAM_TIMEOUT", "The source took too long to respond. Please try again.", { cause: error });
     }
+    if (error instanceof DownloadError) throw error;
     throw new DownloadError("UPSTREAM_ERROR", "The media could not be reached.", { cause: error });
   }
 }

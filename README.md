@@ -10,6 +10,10 @@ An MP4 containing video and an MP3 containing MP3 audio can be delivered as-is. 
 
 Inspection downloads the full input and may convert it to establish genuine availability; the subsequent download repeats that work. Format IDs include a SHA-256 digest of the actual input. The download endpoint re-fetches and re-probes it, and rejects a stale or fabricated selection. No media metadata or files are persistently stored. Upstream changes, time-limited URLs, and bandwidth costs can make this two-request workflow unsuitable for some deployments. The browser currently buffers the final output in a Blob before starting its download.
 
+## Provider investigation
+
+No external media-processing provider is configured. SaveFrom's [website](https://en.savefrom.net/index.php) links to an API, but its [terms](https://en.savefrom.net/34/terms.html) do not establish a documented, permitted server-side media-download integration for this application. We could not verify a suitable official API and terms, so no SaveFrom integration or private endpoint is used. The source-handler registry in `src/lib/source-handlers.ts` isolates source retrieval; a future provider requires verified terms, server-side credentials, and security review before activation. Other social platforms are not supported.
+
 ## Runtime and configuration
 
 Node.js 20.9+ and npm are required. `npm ci`, `npm run dev` to start locally. Production requires a Node runtime, not Edge. **ffprobe is required for every inspection and download**. FFmpeg with the `libmp3lame` encoder is required for conversion. System packages are recommended; the Dockerfile installs both. npm installs bundled ffprobe and optional bundled FFmpeg for supported platforms; these binaries may not work on every OS/architecture. The bundled probe is preferred when available, otherwise `ffprobe` on PATH is used. Set `FFPROBE_PATH` to override it. Set `FFMPEG_PATH` to override FFmpeg discovery (otherwise PATH, then optional installer). Check compatibility and licensing of your own FFmpeg build. Inspect `/api/health` for FFmpeg status; actual processing is checked for each file, not guaranteed by health alone.
