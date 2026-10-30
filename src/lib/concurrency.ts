@@ -43,7 +43,7 @@ export async function acquireSlot(signal?: AbortSignal): Promise<Slot> {
     waiting.push(grant);
   });
 
-  active += 1;
+  // The releasing job transferred its slot directly to this waiter.
   return makeSlot();
 }
 
@@ -54,9 +54,9 @@ function makeSlot(): Slot {
     release: () => {
       if (released) return;
       released = true;
-      active = Math.max(0, active - 1);
       const next = waiting.shift();
       if (next) next();
+      else active = Math.max(0, active - 1);
     },
   };
 }

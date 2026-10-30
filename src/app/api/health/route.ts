@@ -1,3 +1,4 @@
+import { isFfprobeAvailable } from "@/lib/media-info";
 import { getConfig } from "@/lib/config";
 import { getFfmpegStatus } from "@/lib/ffmpeg";
 import { getConcurrencySnapshot } from "@/lib/concurrency";
@@ -16,14 +17,16 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const ffmpeg = await getFfmpegStatus();
   const config = getConfig();
+  const ffprobe = await isFfprobeAvailable();
 
   return Response.json(
     {
       status: "ok",
-      ready: true,
+      ready: ffprobe,
       capabilities: {
-        mp4: true,
-        mp3: ffmpeg.available,
+        mp4: ffprobe,
+        mp3: ffprobe && ffmpeg.available,
+        ffprobe: { available: ffprobe },
         ffmpeg: {
           available: ffmpeg.available,
           source: ffmpeg.source,

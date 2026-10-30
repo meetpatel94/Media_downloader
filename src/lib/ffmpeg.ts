@@ -149,6 +149,9 @@ export function getFfmpegStatus(): Promise<FfmpegStatus> {
       }
 
       const probe = await runBinary(binary.path, ["-hide_banner", "-version"], PROBE_TIMEOUT_MS);
+      if (probe.code !== 0 || !probe.stdout.toLowerCase().includes("ffmpeg version")) {
+        return { available: false, source: null, version: null, reason: "FFmpeg could not be executed. Check the server configuration." };
+      }
       const firstLine = probe.stdout.split("\n")[0]?.trim() ?? "";
       const versionMatch = firstLine.match(/ffmpeg version\s+([^\s]+)/i);
 
@@ -198,6 +201,7 @@ export type ConvertOptions = {
   signal: AbortSignal;
   timeoutMs?: number;
   bitrate?: string;
+  inputFormat?: string;
 };
 
 /**
@@ -216,6 +220,8 @@ export async function convertToMp3(inputPath: string, outputPath: string, option
       "-loglevel",
       "error",
       "-y",
+      "-protocol_whitelist", "file,pipe",
+      ...(options.inputFormat ? ["-f", options.inputFormat] : []),
       "-i",
       inputPath,
       "-vn",
@@ -229,6 +235,7 @@ export async function convertToMp3(inputPath: string, outputPath: string, option
       "44100",
       "-ac",
       "2",
+      "-fs", String(config.maxFileSizeBytes + 1),
       "-f",
       "mp3",
       outputPath,
@@ -307,7 +314,7 @@ export async function convertToMp4(inputPath: string, outputPath: string, option
   const config = getConfig();
   const timeoutMs = options.timeoutMs ?? config.conversionTimeoutMs;
 
-  const base = ["-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", inputPath, "-vn"];
+  const base = ["-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-protocol_whitelist", "file,pipe", "-i", inputPath];
 
   if (options.allowCopy !== false) {
     const copyResult = await runConversion(
@@ -317,12 +324,14 @@ export async function convertToMp4(inputPath: string, outputPath: string, option
         "-loglevel",
         "error",
         "-y",
+        "-protocol_whitelist", "file,pipe",
         "-i",
         inputPath,
         "-c",
         "copy",
         "-movflags",
         "+faststart",
+        "-fs", String(config.maxFileSizeBytes + 1),
         "-f",
         "mp4",
         outputPath,
@@ -349,6 +358,7 @@ export async function convertToMp4(inputPath: string, outputPath: string, option
       "128k",
       "-movflags",
       "+faststart",
+      "-fs", String(config.maxFileSizeBytes + 1),
       "-f",
       "mp4",
       outputPath,

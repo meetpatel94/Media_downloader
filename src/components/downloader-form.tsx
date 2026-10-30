@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type DownloadFormat = "mp4" | "mp3";
 type StatusTone = "idle" | "error" | "success" | "loading";
@@ -59,174 +59,64 @@ function triggerBrowserDownload(blob: Blob, filename: string) {
   window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 60_000);
 }
 
-const TONE_CLASS: Record<StatusTone, string> = {
-  idle: "text-slate-500",
-  loading: "text-slate-700",
-  success: "text-emerald-700",
-  error: "text-rose-700",
-};
+type Format = { id: string; container: "mp4" | "mp3"; resolution: string | null; videoCodec: string | null; audioCodec: string | null; filesize: number | null; hasVideo: boolean; hasAudio: boolean; bitrate: string | null; conversion: boolean };
+type Media = { title: string | null; duration: number | null; sourceType: string; formats: Format[] };
 
 export function DownloaderForm() {
   const [url, setUrl] = useState("");
-  const [format, setFormat] = useState<DownloadFormat>("mp4");
+  const [media, setMedia] = useState<Media | null>(null);
+  const [selected, setSelected] = useState("");
   const [status, setStatus] = useState<Status>(IDLE_STATUS);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
+  const [busy, setBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
-  const inFlightRef = useRef(false);
+  const inFlight = useRef(false);
+  useEffect(() => () => abortRef.current?.abort(), []);
+  const field = "block w-full min-w-0 rounded-2xl border border-slate-300 bg-white px-4 py-3 text-base text-slate-900 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-300 disabled:bg-slate-100";
+  const button = "flex min-h-12 w-full items-center justify-center rounded-2xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-400 disabled:bg-slate-400";
 
-  useEffect(() => {
-    return () => {
-      abortRef.current?.abort();
-    };
-  }, []);
-
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    if (inFlightRef.current) return;
-
-    const trimmedUrl = url.trim();
-
-    if (!trimmedUrl) {
-      setStatus({ tone: "error", message: "Please paste a media URL." });
-      return;
-    }
-
-    if (!parseHttpUrl(trimmedUrl)) {
-      setStatus({ tone: "error", message: "Please enter a valid http:// or https:// URL." });
-      return;
-    }
-
-    inFlightRef.current = true;
-    setIsSubmitting(true);
-    setStatus({
-      tone: "loading",
-      message: format === "mp3" ? "Downloading and converting to MP3..." : "Downloading your video...",
-    });
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-
+  async function run(action: "info" | "download") {
+    if (inFlight.current) return;
+    const value = url.trim();
+    if (!value || !parseHttpUrl(value)) { setStatus({ tone: "error", message: value ? "Please enter a valid http:// or https:// URL." : "Please paste a media URL." }); return; }
+    const format = media?.formats.find((item) => item.id === selected);
+    if (action === "download" && !format) { setStatus({ tone: "error", message: "Select an available format." }); return; }
+    inFlight.current = true; setBusy(true); setStatus({ tone: "loading", message: action === "info" ? "Inspecting media…" : "Preparing download…" });
+    const controller = new AbortController(); abortRef.current = controller;
     try {
-      const response = await fetch("/api/download", {
-        method: "POST",
-        headers: { "content-type": "application/json", accept: "audio/*,video/*,application/json" },
-        body: JSON.stringify({ url: trimmedUrl, format }),
-        signal: controller.signal,
-      });
-
-      const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
-
-      if (!response.ok) {
-        if (contentType.includes("application/json")) {
-          const payload = (await response.json().catch(() => ({}))) as { error?: unknown };
-          const message = typeof payload.error === "string" ? payload.error : "Download failed. Please try again.";
-          throw new Error(message);
-        }
-        throw new Error("Download failed. Please try again.");
+      const response = await fetch(action === "info" ? "/api/media-info" : "/api/download", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(action === "info" ? { url: value } : { url: value, formatId: format!.id, outputFormat: format!.container }), signal: controller.signal });
+      if (!response.ok) { const payload = await response.json().catch(() => ({})); throw new Error(typeof payload.error === "string" ? payload.error : "Request failed. Please try again."); }
+      if (action === "info") {
+        const payload = await response.json();
+        if (!payload.success || !Array.isArray(payload.media?.formats)) throw new Error("The server returned invalid media information.");
+        setMedia(payload.media); setSelected(payload.media.formats[0]?.id ?? ""); setStatus({ tone: "success", message: "Media information ready." });
+      } else {
+        const type = response.headers.get("content-type") ?? "";
+        if (!type.startsWith("audio/") && !type.startsWith("video/")) throw new Error("The server did not return a media file.");
+        const blob = await response.blob(); if (!blob.size) throw new Error("The server returned an empty file.");
+        const filename = filenameFromDisposition(response.headers.get("content-disposition"), format!.container);
+        triggerBrowserDownload(blob, filename); setStatus({ tone: "success", message: `Download started: ${filename}` });
       }
-
-      if (!contentType.startsWith("audio/") && !contentType.startsWith("video/")) {
-        throw new Error("The server did not return a media file. Please try again.");
-      }
-
-      const blob = await response.blob();
-
-      if (blob.size === 0) {
-        throw new Error("The server returned an empty file. Please try again.");
-      }
-
-      const filename = filenameFromDisposition(response.headers.get("content-disposition"), format);
-      triggerBrowserDownload(blob, filename);
-
-      setStatus({
-        tone: "success",
-        message: `Download started: ${filename}`,
-      });
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
-        setStatus({ tone: "error", message: "The download was cancelled." });
-        return;
-      }
-
-      setStatus({
-        tone: "error",
-        message: error instanceof Error && error.message ? error.message : "Download failed. Please try again.",
-      });
-    } finally {
-      inFlightRef.current = false;
-      setIsSubmitting(false);
-      abortRef.current = null;
-    }
+    } catch (error) { setStatus({ tone: "error", message: error instanceof Error && !(error instanceof TypeError) && error.message ? error.message : "Network request failed or was interrupted. Please try again." }); }
+    finally { inFlight.current = false; setBusy(false); abortRef.current = null; }
   }
-
-  return (
-    <form onSubmit={handleSubmit} className="space-y-5 sm:space-y-6" noValidate aria-busy={isSubmitting}>
-      <div className="space-y-2">
-        <label htmlFor="media-url" className="block text-sm font-medium text-slate-800">
-          Media URL
-        </label>
-        <textarea
-          id="media-url"
-          name="media-url"
-          rows={4}
-          value={url}
-          onChange={(event) => setUrl(event.target.value)}
-          placeholder="https://example.com/video.mp4"
-          className="block w-full resize-y rounded-2xl border border-slate-300 bg-white px-4 py-3 text-base leading-6 text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus-visible:border-slate-500 focus-visible:ring-4 focus-visible:ring-slate-300 disabled:cursor-not-allowed disabled:bg-slate-100"
-          aria-describedby="download-status"
-          autoComplete="off"
-          spellCheck={false}
-          inputMode="url"
-          disabled={isSubmitting}
-        />
-      </div>
-
-      <div className="space-y-2">
-        <label htmlFor="format" className="block text-sm font-medium text-slate-800">
-          Format
-        </label>
-        <select
-          id="format"
-          name="format"
-          value={format}
-          onChange={(event) => setFormat(event.target.value as DownloadFormat)}
-          className="block h-12 w-full rounded-2xl border border-slate-300 bg-white px-4 text-base text-slate-900 shadow-sm outline-none transition focus-visible:border-slate-500 focus-visible:ring-4 focus-visible:ring-slate-300 disabled:cursor-not-allowed disabled:bg-slate-100"
-          disabled={isSubmitting}
-        >
-          <option value="mp4">MP4 Video</option>
-          <option value="mp3">MP3 Audio</option>
-        </select>
-      </div>
-
-      <button
-        type="submit"
-        disabled={isSubmitting}
-        className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-slate-950 px-5 text-sm font-semibold text-white transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-400/60 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
-      >
-        {isSubmitting ? (
-          <>
-            <span
-              aria-hidden="true"
-              className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
-            />
-            Downloading...
-          </>
-        ) : (
-          "Download"
-        )}
-      </button>
-
-      <p
-        id="download-status"
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-        className={`min-h-5 break-words text-sm leading-6 ${TONE_CLASS[status.tone]}`}
-      >
-        {status.message}
-      </p>
-    </form>
-  );
+  return <form className="space-y-5 sm:space-y-6" noValidate aria-busy={busy} onSubmit={(event) => { event.preventDefault(); void run("info"); }}>
+    <div className="space-y-2"><label htmlFor="media-url" className="block text-sm font-medium text-slate-800">Media URL</label>
+      <textarea id="media-url" rows={4} value={url} onChange={(event) => { setUrl(event.target.value); setMedia(null); setSelected(""); }} placeholder="https://example.com/video.mp4" className={field + " resize-y break-all"} aria-describedby="download-status" autoComplete="off" spellCheck={false} inputMode="url" disabled={busy} />
+    </div>
+    <button className={button} disabled={busy} type="submit">{busy ? "Working…" : "Fetch Info"}</button>
+    {media && <section aria-labelledby="media-heading" className="min-w-0 space-y-3 rounded-2xl bg-slate-50 p-4 text-sm text-slate-700">
+      <h2 id="media-heading" className="font-semibold text-slate-950">Media information</h2>
+      {media.title && <p className="break-words"><strong>Title:</strong> {media.title}</p>}
+      <p>Source: Direct media file</p>
+      {media.duration !== null && <p>Duration: {Math.round(media.duration)} seconds</p>}
+      <p>Thumbnail and other unavailable metadata are not provided.</p>
+      <label htmlFor="format" className="block font-medium">Available formats and quality</label>
+      <select id="format" className={field} value={selected} onChange={(e) => setSelected(e.target.value)} disabled={busy}>
+        {media.formats.map((f) => <option key={f.id} value={f.id}>{f.container.toUpperCase()} {f.resolution ? `— ${f.resolution}` : ""} {f.bitrate ? `— ${f.bitrate}` : ""}{f.conversion ? " (converted)" : " (original)"}</option>)}
+      </select>
+      {media.formats.filter((f) => f.id === selected).map((f) => <div key={f.id} className="break-words space-y-1"><p>{f.hasVideo && f.hasAudio ? "Audio and video combined" : f.hasVideo ? "Video only" : "Audio only"}</p><p>Video codec: {f.videoCodec ?? "unavailable"} · Audio codec: {f.audioCodec ?? "unavailable"}</p><p>File size: {f.filesize === null ? "unavailable" : `${(f.filesize / 1024 / 1024).toFixed(2)} MB`}</p></div>)}
+      <button type="button" className={button} disabled={busy || !selected} onClick={() => void run("download")}>{busy ? "Working…" : "Download"}</button>
+    </section>}
+    <p id="download-status" role="status" aria-live="polite" className={`min-h-5 break-words text-sm leading-6 ${status.tone === "error" ? "text-rose-700" : "text-slate-700"}`}>{status.message}</p>
+  </form>;
 }
