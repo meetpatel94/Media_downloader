@@ -80,6 +80,7 @@ export function DownloaderForm() {
     if (!value || !parseHttpUrl(value)) { setStatus({ tone: "error", message: value ? "Please enter a valid http:// or https:// URL." : "Please paste a media URL." }); return; }
     const format = media?.formats.find((item) => item.id === selected);
     if (action === "download" && !format) { setStatus({ tone: "error", message: "Select an available format." }); return; }
+    if (action === "info") { setMedia(null); setSelected(""); }
     inFlight.current = true; setBusy(true); setStatus({ tone: "loading", message: action === "info" ? "Inspecting media…" : "Preparing download…" });
     const controller = new AbortController(); abortRef.current = controller;
     try {

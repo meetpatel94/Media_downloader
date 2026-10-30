@@ -55,3 +55,20 @@ test("direct MP3 is inspected and downloaded without invented video", async () =
     try { const response = await info(req({ url })); assert.equal(response.status, 200); const { media } = await response.json(); assert.equal(media.formats.length, 1); assert.equal(media.formats[0].hasVideo, false); assert.equal(media.formats[0].audioCodec, "mp3"); const result = await download(req({ url, formatId: media.formats[0].id, outputFormat: "mp3" })); assert.equal(result.status, 200); assert.deepEqual(Buffer.from(await result.arrayBuffer()), data); } finally { fetch(); dns(); }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("aborting a response errors the stream and releases the job slot", async () => {
+  const data = await fixture(); const dns = installPublicDns(); const fetch = installFetchMock(() => streamResponse([data], { contentType: "video/mp4" }));
+  try {
+    const response = await info(req({ url })); const { media } = await response.json();
+    const format = media.formats.find((f: { container: string }) => f.container === "mp4");
+    const controller = new AbortController();
+    const request = new NextRequest("http://localhost/api/download", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url, formatId: format.id, outputFormat: "mp4" }), signal: controller.signal });
+    const result = await download(request); const reader = result.body!.getReader();
+    controller.abort();
+    await assert.rejects(reader.read());
+    // Cleanup is asynchronous and completes before the next event-loop turn.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const { getConcurrencySnapshot } = await import("@/lib/concurrency");
+    assert.equal(getConcurrencySnapshot().active, 0);
+  } finally { fetch(); dns(); }
+});

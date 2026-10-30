@@ -31,8 +31,7 @@ function streamArtifact(filePath: string, cleanup: () => Promise<void>, size: nu
   };
 
   const onAbort = () => {
-    nodeStream.destroy();
-    void cleanupOnce();
+    nodeStream.destroy(new Error("Response aborted"));
   };
 
   if (signal.aborted) onAbort();
