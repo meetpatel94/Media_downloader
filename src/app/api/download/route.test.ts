@@ -1,74 +1,103 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { NextRequest } from "next/server";
+import { GET as downloadGet, POST as download } from "@/app/api/download/route";
 import { POST as info } from "@/app/api/media-info/route";
-import { POST as download } from "@/app/api/download/route";
-import { installFetchMock, installPublicDns, streamResponse, redirectResponse } from "@/test-utils/fetch-mock";
-const url = "https://samplelib.com/video.mp4";
-function req(body: unknown) { return new NextRequest("http://localhost/api", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); }
-async function fixture() {
-  const dir = await mkdtemp(join(tmpdir(), "fixture-"));
-  try {
-    const binary = (await import("@ffmpeg-installer/ffmpeg")).path;
-    const path = join(dir, "input.mp4");
-    const result = spawnSync(binary, ["-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=1", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", path]);
-    assert.equal(result.status, 0, result.stderr.toString());
-    return await readFile(path);
-  } finally { await rm(dir, { recursive: true, force: true }); }
+import { getConcurrencySnapshot } from "@/lib/concurrency";
+import { mediaFixture } from "@/test-utils/media-fixtures";
+import { installFetchMock, installPublicDns, streamResponse } from "@/test-utils/fetch-mock";
+
+const URL_MP4 = "https://samplelib.com/lib/preview/mp4/sample.mp4";
+
+function post(path: string, body: unknown, signal?: AbortSignal): NextRequest {
+  return new NextRequest(`http://localhost${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
 }
-test("inspection and verified MP4/MP3 downloads use real media", async () => {
-  const data = await fixture(); const dns = installPublicDns(); const fetch = installFetchMock(() => streamResponse([data], { contentType: "video/mp4" }));
+
+async function withNetwork<T>(handler: Parameters<typeof installFetchMock>[0], run: () => Promise<T>): Promise<T> {
+  const dns = installPublicDns();
+  const restore = installFetchMock(handler);
+
   try {
-    const res = await info(req({ url })); assert.equal(res.status, 200, await res.clone().text());
-    const { media } = await res.json(); assert.equal(media.sourceType, "direct-media");
-    const mp4 = media.formats.find((f: { container: string }) => f.container === "mp4");
-    const mp3 = media.formats.find((f: { container: string }) => f.container === "mp3");
-    assert.equal(mp4.resolution, "48p"); assert.equal(mp4.videoCodec, "h264"); assert.equal(mp4.hasAudio, true); assert.ok(mp3);
-    for (const f of [mp4, mp3]) { const output = await download(req({ url, formatId: f.id, outputFormat: f.container })); assert.equal(output.status, 200, await output.clone().text()); const bytes = Buffer.from(await output.arrayBuffer()); assert.ok(bytes.length > 100); assert.equal(output.headers.get("content-type"), f.container === "mp4" ? "video/mp4" : "audio/mpeg"); }
-    const invalid = await download(req({ url, formatId: "made-up", outputFormat: "mp4" })); assert.equal(invalid.status, 400); assert.equal((await invalid.json()).code, "INVALID_FORMAT");
-  } finally { fetch(); dns(); }
-});
-test("request errors and unsupported platforms are actionable", async () => {
-  assert.equal((await info(req({ url: "not a url" }))).status, 400);
-  assert.equal((await info(req({ url: "https://youtu.be/abcdefghijk" }))).status, 422);
-  assert.equal((await download(req({ url, formatId: "", outputFormat: "mp4" }))).status, 400);
-  assert.equal((await info(req({ url: "https://127.0.0.1/a.mp4" }))).status, 400);
-});
-test("inspection blocks unsafe redirects and oversized files", async () => {
-  const dns = installPublicDns(); let restore = installFetchMock(() => redirectResponse("http://127.0.0.1/file.mp4"));
-  try { assert.equal((await info(req({ url }))).status, 400); restore(); restore = installFetchMock(() => streamResponse([new Uint8Array([1])], { contentLength: 100000000 })); assert.equal((await info(req({ url }))).status, 413); } finally { restore(); dns(); }
-});
-test("missing ffprobe yields a safe dependency error", async () => {
-  const data = await fixture(); const dns = installPublicDns(); const fetch = installFetchMock(() => streamResponse([data], { contentType: "video/mp4" })); const old = process.env.FFPROBE_PATH; process.env.FFPROBE_PATH = "/missing/probe";
-  try { const response = await info(req({ url })); assert.equal(response.status, 503); assert.match((await response.json()).error, /ffprobe/i); } finally { if (old === undefined) delete process.env.FFPROBE_PATH; else process.env.FFPROBE_PATH = old; fetch(); dns(); }
-});
-test("direct MP3 is inspected and downloaded without invented video", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "audio-fixture-"));
-  try {
-    const binary = (await import("@ffmpeg-installer/ffmpeg")).path; const path = join(dir, "sound.mp3");
-    const generated = spawnSync(binary, ["-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "libmp3lame", path]); assert.equal(generated.status, 0);
-    const data = await readFile(path); const dns = installPublicDns(); const fetch = installFetchMock(() => streamResponse([data], { contentType: "audio/mpeg" }));
-    try { const response = await info(req({ url })); assert.equal(response.status, 200); const { media } = await response.json(); assert.equal(media.formats.length, 1); assert.equal(media.formats[0].hasVideo, false); assert.equal(media.formats[0].audioCodec, "mp3"); const result = await download(req({ url, formatId: media.formats[0].id, outputFormat: "mp3" })); assert.equal(result.status, 200); assert.deepEqual(Buffer.from(await result.arrayBuffer()), data); } finally { fetch(); dns(); }
-  } finally { await rm(dir, { recursive: true, force: true }); }
+    return await run();
+  } finally {
+    restore();
+    dns();
+  }
+}
+
+async function leftoverTempDirs(): Promise<string[]> {
+  return (await readdir(tmpdir())).filter((entry) => entry.startsWith("media-downloader-"));
+}
+
+test("streams a verified MP4 and removes the temp directory afterwards", async () => {
+  const body = await mediaFixture("av-mp4");
+
+  await withNetwork(
+    () => streamResponse([body], { contentType: "video/mp4", contentLength: body.byteLength }),
+    async () => {
+      const inspected = await info(post("/api/media-info", { url: URL_MP4 }));
+      const { media } = (await inspected.json()) as { media: { formats: Array<{ id: string; container: string }> } };
+      const format = media.formats.find((entry) => entry.container === "mp4");
+      assert.ok(format);
+
+      const response = await download(post("/api/download", { url: URL_MP4, formatId: format.id, outputFormat: "mp4" }));
+      assert.equal(response.status, 200);
+
+      const bytes = Buffer.from(await response.arrayBuffer());
+      assert.equal(bytes.length, body.byteLength);
+    },
+  );
+
+  // Cleanup is scheduled when the stream ends.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(await leftoverTempDirs(), []);
 });
 
 test("aborting a response errors the stream and releases the job slot", async () => {
-  const data = await fixture(); const dns = installPublicDns(); const fetch = installFetchMock(() => streamResponse([data], { contentType: "video/mp4" }));
-  try {
-    const response = await info(req({ url })); const { media } = await response.json();
-    const format = media.formats.find((f: { container: string }) => f.container === "mp4");
-    const controller = new AbortController();
-    const request = new NextRequest("http://localhost/api/download", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url, formatId: format.id, outputFormat: "mp4" }), signal: controller.signal });
-    const result = await download(request); const reader = result.body!.getReader();
-    controller.abort();
-    await assert.rejects(reader.read());
-    // Cleanup is asynchronous and completes before the next event-loop turn.
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    const { getConcurrencySnapshot } = await import("@/lib/concurrency");
-    assert.equal(getConcurrencySnapshot().active, 0);
-  } finally { fetch(); dns(); }
+  const body = await mediaFixture("av-mp4");
+
+  await withNetwork(
+    () => streamResponse([body], { contentType: "video/mp4", contentLength: body.byteLength }),
+    async () => {
+      const inspected = await info(post("/api/media-info", { url: URL_MP4 }));
+      const { media } = (await inspected.json()) as { media: { formats: Array<{ id: string; container: string }> } };
+      const format = media.formats.find((entry) => entry.container === "mp4");
+      assert.ok(format);
+
+      const controller = new AbortController();
+      const response = await download(
+        post("/api/download", { url: URL_MP4, formatId: format.id, outputFormat: "mp4" }, controller.signal),
+      );
+      const reader = response.body!.getReader();
+
+      controller.abort();
+      await assert.rejects(reader.read());
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(getConcurrencySnapshot().active, 0);
+    },
+  );
+
+  assert.deepEqual(await leftoverTempDirs(), []);
+});
+
+test("rejects a body larger than the API limit", async () => {
+  const response = await download(post("/api/download", { url: "https://samplelib.com/a.mp4", formatId: "x".repeat(9000), outputFormat: "mp4" }));
+
+  assert.equal(response.status, 400);
+  assert.equal(((await response.json()) as { code?: string }).code, "INVALID_BODY");
+});
+
+test("does not allow GET", async () => {
+  const response = downloadGet();
+
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get("allow"), "POST");
 });

@@ -10,7 +10,7 @@
 import { promises as dns } from "node:dns";
 import { isBlockedHostname, isBlockedIp } from "@/lib/ip";
 import { DownloadError, type DownloadErrorCode } from "@/lib/errors";
-import { classifySource, getSupportedHosts, MESSAGES, type ClassifiedSource } from "@/lib/sources";
+import { classifySource, MESSAGES, type ClassifiedSource } from "@/lib/sources";
 
 export const MAX_URL_LENGTH = 2048;
 
@@ -157,5 +157,3 @@ export function isAllowedRedirect(location: string, current?: URL): boolean {
     return false;
   }
 }
-
-export const SUPPORTED_HOSTS = getSupportedHosts();

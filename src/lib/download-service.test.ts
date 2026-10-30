@@ -8,6 +8,7 @@ import { downloadMedia, filenameForUrl } from "@/lib/download-service";
 import { DownloadError } from "@/lib/errors";
 import { getFfmpegStatus, resetFfmpegCache } from "@/lib/ffmpeg";
 import { sniffContainer } from "@/lib/media-inspect";
+import { mediaFixture } from "@/test-utils/media-fixtures";
 import {
   bytes,
   fakeMp3Body,
@@ -100,7 +101,7 @@ test("rejects YouTube URLs with an actionable error and never fetches them", asy
         await assert.rejects(downloadMedia(url, "mp4"), (error: unknown) => {
           assert.ok(error instanceof DownloadError);
           assert.equal(error.code, "UNSUPPORTED_SOURCE");
-          assert.match(error.message, /YouTube links cannot be downloaded/);
+          assert.match(error.message, /YouTube media files cannot be downloaded/);
           return true;
         });
       }
@@ -231,7 +232,8 @@ test("rejects a video-only source when MP3 is requested and no audio track exist
       async () => {
         await assert.rejects(downloadMedia(MEDIA_URL, "mp3"), (error: unknown) => {
           assert.ok(error instanceof DownloadError);
-          assert.equal(error.code, "CONVERSION_FAILED");
+          // No audio track exists, so the conversion is impossible before FFmpeg runs.
+          assert.equal(error.code, "FORMAT_UNAVAILABLE");
           return true;
         });
       },
@@ -359,4 +361,84 @@ test("rejects an audio-only file typed as octet-stream when MP4 is requested", a
       });
     },
   );
+});
+
+test("serves a real WebM file as WebM without re-encoding", async () => {
+  const body = await mediaFixture("video-webm");
+
+  await withNetwork(
+    () => streamResponse([body], { contentType: "video/webm", contentLength: body.byteLength }),
+    async () => {
+      const artifact = await downloadMedia("https://samplelib.com/lib/preview/webm/sample.webm", "webm");
+
+      try {
+        assert.equal(artifact.contentType, "video/webm");
+        assert.equal(artifact.filename, "sample.webm");
+        assert.equal(artifact.size, body.byteLength);
+        assert.equal(sniffContainer(new Uint8Array(await readFile(artifact.filePath)).subarray(0, 32)), "webm");
+      } finally {
+        await artifact.cleanup();
+      }
+    },
+  );
+
+  assert.deepEqual(await tempDownloaderDirs(), []);
+});
+
+test("serves a real M4A file as audio/mp4", async () => {
+  const body = await mediaFixture("audio-m4a");
+
+  await withNetwork(
+    () => streamResponse([body], { contentType: "audio/mp4", contentLength: body.byteLength }),
+    async () => {
+      const artifact = await downloadMedia("https://samplelib.com/lib/preview/m4a/sample.m4a", "m4a");
+
+      try {
+        assert.equal(artifact.contentType, "audio/mp4");
+        assert.equal(artifact.filename, "sample.m4a");
+        assert.equal(artifact.size, body.byteLength);
+      } finally {
+        await artifact.cleanup();
+      }
+    },
+  );
+});
+
+test("refuses to relabel a WebM video as MP3", async () => {
+  const body = await mediaFixture("video-webm");
+
+  await withNetwork(
+    () => streamResponse([body], { contentType: "video/webm", contentLength: body.byteLength }),
+    async () => {
+      await assert.rejects(downloadMedia("https://samplelib.com/lib/preview/webm/sample.webm", "mp3"), (error: unknown) => {
+        assert.ok(error instanceof DownloadError);
+        assert.equal(error.code, "FORMAT_UNAVAILABLE");
+        return true;
+      });
+    },
+  );
+
+  assert.deepEqual(await tempDownloaderDirs(), []);
+});
+
+test("public source policy fetches an unlisted public host end-to-end", async () => {
+  const body = await mediaFixture("av-mp4");
+
+  await withEnv({ MEDIA_DOWNLOADER_SOURCE_POLICY: "public" }, async () => {
+    await withNetwork(
+      () => streamResponse([body], { contentType: "video/mp4", contentLength: body.byteLength }),
+      async () => {
+        const artifact = await downloadMedia("https://media.example.com/files/clip.mp4", "mp4");
+
+        try {
+          assert.equal(artifact.contentType, "video/mp4");
+          assert.equal(artifact.size, body.byteLength);
+        } finally {
+          await artifact.cleanup();
+        }
+      },
+    );
+  });
+
+  assert.deepEqual(await tempDownloaderDirs(), []);
 });

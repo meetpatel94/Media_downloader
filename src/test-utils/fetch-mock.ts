@@ -89,3 +89,23 @@ export function neverResolvingFetch(init: RequestInit): Promise<Response> {
 export function redirectResponse(location: string, status = 302): Response {
   return new Response(null, { status, headers: { location } });
 }
+
+/** A JSON `Response` (used by the YouTube metadata tests). */
+export function jsonResponse(data: unknown, init: { status?: number; headers?: Record<string, string> } = {}): Response {
+  return new Response(JSON.stringify(data), {
+    status: init.status ?? 200,
+    headers: { "content-type": "application/json; charset=utf-8", ...(init.headers ?? {}) },
+  });
+}
+
+/** A response whose body is larger than any sane metadata document. */
+export function oversizedJsonResponse(): Response {
+  const payload = JSON.stringify({ title: "x".repeat(200_000), thumbnail_url: "https://i.ytimg.com/vi/x/hq.jpg" });
+
+  return new Response(payload, { status: 200, headers: { "content-type": "application/json" } });
+}
+
+/** A response that never resolves until the caller's signal aborts. */
+export function stalledJsonFetch(_url: string, init: RequestInit): Promise<Response> {
+  return neverResolvingFetch(init);
+}
