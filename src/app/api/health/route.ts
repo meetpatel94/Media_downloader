@@ -3,7 +3,7 @@ import { getConfig } from "@/lib/config";
 import { getFfmpegStatus } from "@/lib/ffmpeg";
 import { getConcurrencySnapshot } from "@/lib/concurrency";
 import { listSourceHandlers } from "@/lib/source-handlers";
-import { youTubeCapability } from "@/lib/platform";
+import { youTubeCapability } from "@/lib/platform";\nimport { listPlatformProviders } from "@/lib/platform-providers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,7 +45,7 @@ export async function GET() {
         maxFileSizeMb: Math.round(config.maxFileSizeBytes / (1024 * 1024)),
         maxConcurrentDownloads: config.maxConcurrentJobs,
       },
-      sources: listSourceHandlers(),
+      sources: listSourceHandlers(),\n      platformProviders: listPlatformProviders(),
       jobs: getConcurrencySnapshot(),
     },
     {
