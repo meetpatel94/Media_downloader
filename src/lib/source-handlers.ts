@@ -199,7 +199,8 @@ const platformHandler: SourceHandler = {
       throw new DownloadError("UNSUPPORTED_SOURCE", MESSAGES.unsupportedSource);
     }
 
-    const provider = getPlatformProvider(platform.name);\n    const metadata = await provider.fetchMetadata({ videoId: platform.videoId, signal: context.signal });
+    const provider = getPlatformProvider(platform.name);
+    const metadata = await provider.fetchMetadata({ videoId: platform.videoId, signal: context.signal });
 
     return {
       metadata: {
