@@ -13,14 +13,10 @@ const NO_STORE = { "cache-control": "no-store", "x-content-type-options": "nosni
 /**
  * Inspect a media URL and return real, verified metadata.
  *
- * Response:
- *   { success: true, media: { title, duration, thumbnail, sourceType,
- *     sourceLabel, author, metadataProvider, downloadSupported, limitation,
- *     notes, formats: [{ id, container, label, resolution, videoCodec,
- *     audioCodec, filesize, bitrate, sourceAudioBitrate, hasVideo, hasAudio,
- *     conversion }] } }
- *
- * Unavailable values are `null`; nothing is invented.
+ * A successful response distinguishes successful metadata lookup from verified
+ * download availability. `formats` lists only usable, server-verified outputs;
+ * `supportedConversions` is derived from that list. `limitations` describes
+ * the reason an otherwise valid media item cannot be downloaded or converted.
  */
 export async function POST(request: NextRequest) {
   try {

@@ -9,6 +9,8 @@ import { setupDom, type DomHarness } from "@/test-utils/dom";
 const DIGEST = "a".repeat(64);
 
 const MEDIA: Media = {
+  metadataAvailable: true,
+  downloadAvailable: true,
   title: "Sample clip",
   duration: 95,
   thumbnail: null,
@@ -17,6 +19,8 @@ const MEDIA: Media = {
   author: null,
   metadataProvider: null,
   downloadSupported: true,
+  supportedConversions: ["mp3"],
+  limitations: [],
   limitation: null,
   notes: [],
   formats: [
@@ -237,6 +241,10 @@ test("a metadata-only source shows its metadata and explains the missing capabil
       success: true,
       media: {
         ...MEDIA,
+        metadataAvailable: true,
+        downloadAvailable: false,
+        supportedConversions: [],
+        limitations: ["YouTube media files cannot be downloaded by this deployment."],
         sourceType: "youtube",
         sourceLabel: "YouTube video",
         title: "Real YouTube title",
@@ -266,6 +274,37 @@ test("a metadata-only source shows its metadata and explains the missing capabil
     assert.ok(thumbnail);
     assert.equal(thumbnail.getAttribute("src"), "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg");
     assert.match(thumbnail.getAttribute("referrerpolicy") ?? "", /no-referrer/);
+  } finally {
+    network.restore();
+    await unmount();
+  }
+});
+
+test("shows the Download action for verified formats regardless of source type", async () => {
+  const platformMedia: Media = {
+    ...MEDIA,
+    sourceType: "youtube",
+    sourceLabel: "Configured video source",
+    downloadAvailable: true,
+  };
+  const network = mockFetch((url) => {
+    if (url === "/api/media-info") return Response.json({ success: true, media: platformMedia });
+    return new Response(new Uint8Array([0, 0, 0, 1]), {
+      status: 200,
+      headers: {
+        "content-type": "video/mp4",
+        "content-disposition": 'attachment; filename="source.mp4"',
+      },
+    });
+  });
+  const { harness, unmount } = await render();
+
+  try {
+    await act(async () => harness.setTextareaValue("media-url", "https://youtu.be/dQw4w9WgXcQ"));
+    await act(async () => harness.submitForm());
+
+    const downloadButton = [...harness.container.querySelectorAll("button")].find((button) => button.textContent === "Download");
+    assert.ok(downloadButton, "verified server formats make Download visible even for a platform source");
   } finally {
     network.restore();
     await unmount();
