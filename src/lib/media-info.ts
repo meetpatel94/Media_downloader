@@ -89,7 +89,8 @@ type CandidateArgs = {
  * Rules:
  * - a container is offered as `original` only when the downloaded bytes are
  *   already that container (webm is never re-labelled as mp4, and an MP4 is
- *   never re-labelled as MP3);
+ *   never re-labelled as MP3). Any supported container qualifies, including
+ *   audio-only MP4/WebM files, because those bytes are still a real download;
  * - MP3 conversions are offered only when FFmpeg is present *and* the source
  *   has an audio stream;
  * - the default MP3 variant carries the real size of an encode that actually
@@ -115,53 +116,42 @@ function buildFormats(args: CandidateArgs): MediaFormat[] {
     formats.push({ ...format, label: formatLabel(format) });
   };
 
-  if (args.video) {
-    const container = args.container;
+  /**
+   * The upstream file itself can always be served byte-for-byte when its
+   * container maps to a supported output. This is deliberately independent of
+   * which streams were probed: an audio-only MP4/WebM is still a real MP4/WebM
+   * file, and previously it had no passthrough option at all.
+   */
+  const passthrough: OutputContainer | null =
+    args.container === "aac"
+      ? "m4a"
+      : args.container === "mp4" || args.container === "webm" || args.container === "mp3"
+        ? args.container
+        : null;
 
-    if (container === "mp4" || container === "webm") {
-      push({
-        ...base,
-        id: encodeFormatId(args.digest, { kind: "original", container }),
-        container,
-        filesize: args.sourceSize,
-        bitrate: bitrateLabel(args.video.bit_rate),
-        // A passthrough audio codec is whatever the container holds.
-        conversion: false,
-      });
-    } else if (args.ffmpegAvailable && containerKind(container) === "video") {
-      // e.g. MPEG-TS: re-package/encode into an MP4 that browsers can play.
-      push({
-        ...base,
-        id: encodeFormatId(args.digest, { kind: "transcode", container: "mp4" }),
-        container: "mp4",
-        filesize: null,
-        bitrate: null,
-        conversion: true,
-      });
-    }
+  if (passthrough && (args.video || args.audio)) {
+    push({
+      ...base,
+      id: encodeFormatId(args.digest, { kind: "original", container: passthrough }),
+      container: passthrough,
+      filesize: args.sourceSize,
+      // A passthrough file's bitrate is the bitrate of the stream it carries.
+      bitrate: bitrateLabel(args.video?.bit_rate ?? args.audio?.bit_rate),
+      conversion: false,
+    });
+  } else if (args.video && args.ffmpegAvailable && containerKind(args.container) === "video") {
+    // e.g. MPEG-TS: re-package/encode into an MP4 that browsers can play.
+    push({
+      ...base,
+      id: encodeFormatId(args.digest, { kind: "transcode", container: "mp4" }),
+      container: "mp4",
+      filesize: null,
+      bitrate: null,
+      conversion: true,
+    });
   }
 
   if (args.audio) {
-    if (args.container === "mp3") {
-      push({
-        ...base,
-        id: encodeFormatId(args.digest, { kind: "original", container: "mp3" }),
-        container: "mp3",
-        filesize: args.sourceSize,
-        bitrate: sourceAudioBitrate,
-        conversion: false,
-      });
-    } else if (args.container === "aac") {
-      push({
-        ...base,
-        id: encodeFormatId(args.digest, { kind: "original", container: "m4a" }),
-        container: "m4a",
-        filesize: args.sourceSize,
-        bitrate: sourceAudioBitrate,
-        conversion: false,
-      });
-    }
-
     if (args.ffmpegAvailable && args.mp3Supported && args.container !== "mp3") {
       for (const bitrateKbps of allowedMp3Bitrates()) {
         const verified = args.verifiedMp3?.bitrateKbps === bitrateKbps ? args.verifiedMp3 : null;
@@ -188,6 +178,22 @@ function buildFormats(args: CandidateArgs): MediaFormat[] {
 
 function formatSpecOf(id: string): FormatSpec | null {
   return decodeFormatId(id)?.spec ?? null;
+}
+
+/** Trim, drop blanks and remove repeats while preserving order. */
+function uniqueMessages(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const messages: string[] = [];
+
+  for (const value of values) {
+    const message = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+    if (!message || seen.has(message)) continue;
+
+    seen.add(message);
+    messages.push(message);
+  }
+
+  return messages;
 }
 
 /**
@@ -241,9 +247,13 @@ export async function inspectMedia(
     const sourceType = SOURCE_TYPE[validated.source.kind] ?? "direct-media";
 
     // Metadata-only source (e.g. YouTube): report what the official API knows
-    // and state plainly that the media itself cannot be downloaded.
+    // and state plainly that the media itself cannot be downloaded. The reason
+    // is published once, as a limitation; `notes` only carries anything extra,
+    // so clients cannot render the same explanation twice.
     if (!inspection.media) {
-      const notes = inspection.notes.filter(Boolean);
+      const messages = uniqueMessages(inspection.notes);
+      const limitation = messages[0] ?? null;
+
       const media: MediaInfo = {
         metadataAvailable: true,
         downloadAvailable: false,
@@ -257,9 +267,9 @@ export async function inspectMedia(
         metadataProvider: inspection.metadata.provider,
         formats: [],
         supportedConversions: [],
-        limitations: notes,
-        limitation: notes[0] ?? null,
-        notes,
+        limitations: limitation ? [limitation] : [],
+        limitation,
+        notes: messages.slice(1),
       };
 
       return { media };

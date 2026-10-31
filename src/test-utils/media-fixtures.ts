@@ -11,7 +11,14 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export type FixtureKind = "av-mp4" | "video-webm" | "audio-m4a" | "audio-mp3" | "av-mpegts";
+export type FixtureKind =
+  | "av-mp4"
+  | "video-webm"
+  | "audio-m4a"
+  | "audio-mp3"
+  | "audio-mp4"
+  | "audio-webm"
+  | "av-mpegts";
 
 const cache = new Map<FixtureKind, Uint8Array>();
 let ffmpegBinary: string | null = null;
@@ -71,6 +78,14 @@ export async function mediaFixture(kind: FixtureKind): Promise<Uint8Array> {
         break;
       case "audio-mp3":
         run(bin, [...AUDIO, "-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3", output]);
+        break;
+      case "audio-mp4":
+        // An MP4 container that carries audio only (`ftypisom`, no video track).
+        run(bin, [...AUDIO, "-c:a", "aac", "-b:a", "96k", "-f", "mp4", output]);
+        break;
+      case "audio-webm":
+        // A WebM container that carries audio only.
+        run(bin, [...AUDIO, "-c:a", "libopus", "-b:a", "64k", "-f", "webm", output]);
         break;
       case "av-mpegts":
         run(bin, [...VIDEO, ...AUDIO, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", "-f", "mpegts", output]);

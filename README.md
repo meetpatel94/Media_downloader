@@ -10,8 +10,8 @@ The important design rule: **the server never trusts client metadata and never a
 
 | Capability | Status |
 | --- | --- |
-| Direct MP4 download (passthrough, no re-encode) | ✅ implemented & tested |
-| Direct WebM download (passthrough) | ✅ implemented & tested |
+| Direct MP4 download (passthrough, no re-encode; video or audio-only container) | ✅ implemented & tested |
+| Direct WebM download (passthrough; video or audio-only container) | ✅ implemented & tested |
 | Direct M4A/AAC download (`audio/mp4`) | ✅ implemented & tested |
 | Direct MP3 download (passthrough) | ✅ implemented & tested |
 | Real MP3 conversion from audio/video sources at selectable bitrate (128/192/320 kbps + configured default) | ✅ implemented & tested with real media |
@@ -19,6 +19,35 @@ The important design rule: **the server never trusts client metadata and never a
 | YouTube **metadata** (title, channel, thumbnail, duration) | ✅ implemented; **not verifiable from this sandbox** because it has no egress to `youtube.com` (see below) |
 | YouTube **media download** | ❌ not implemented, and not permitted by YouTube's APIs/ToS |
 | SaveFrom / other platforms | ❌ not implemented (no documented, permitted server-side API) |
+
+---
+
+## User interface
+
+`src/components/downloader-form.tsx` keeps two **separate** message channels so a
+source limitation can never be shown twice:
+
+| Channel | Shows | Never shows |
+| --- | --- | --- |
+| Media information card (`section[aria-labelledby="media-heading"]`) | title, channel, source, duration, verified format pickers, source limitations and notes | transient request/validation errors |
+| Status line (`#download-status`) | loading ("Inspecting media…", "Preparing download…"), validation, request failures, download result | source limitations or notes |
+
+Rules enforced by the component (and covered by the jsdom tests):
+
+* `limitations` and the legacy `limitation` are merged into one list, whitespace
+  normalised and de-duplicated; any note that repeats one of those messages is
+  dropped. Each message is rendered exactly once, inside the card.
+* `/api/media-info` likewise publishes the YouTube explanation only in
+  `limitations`; `notes` carries supplementary information only, so the payload
+  itself contains no repeated copy.
+* The **Download** button exists only when the API returned at least one format
+  **and** `downloadAvailable !== false` **and** the selected format has a valid
+  id whose container is one of MP4/WebM/M4A/MP3. Metadata without a verified
+  format therefore renders one explanation and no button.
+* When there are neither formats nor limitations, one fallback sentence is
+  shown instead of an empty section.
+* Errors are announced with `role="alert"` / `aria-live="assertive"`; the
+  status line is only used for transient operation state.
 
 ---
 
@@ -99,7 +128,25 @@ YouTube URLs (watch, `youtu.be`, Shorts, embed, live, music) are recognised and 
 
 If the Data API fails for a transient/quota reason the key-free oEmbed endpoint is used automatically.
 
-**Downloading is a different capability and is not implemented.** The Data API returns metadata and embed players, not media files; YouTube's Terms of Service prohibit downloading except through features they provide. There is no `yt-dlp`, no signature/cipher extraction, no page scraping, no DRM bypass, and no third-party "save from" endpoint in this repository. `POST /api/download` for a YouTube URL answers `422 UNSUPPORTED_SOURCE` with an explanation, and `/api/media-info` returns the real metadata with `"metadataAvailable": true`, `"downloadAvailable": false`, `"formats": []`, and a `limitations` entry (the legacy `downloadSupported` and `limitation` fields remain for compatibility).
+**Downloading is a different capability and is not implemented.** The Data API returns metadata and embed players, not media files; YouTube's Terms of Service prohibit downloading except through features they provide. There is no `yt-dlp`, no signature/cipher extraction, no page scraping, no DRM bypass, and no third-party "save from" endpoint in this repository. `POST /api/download` for a YouTube URL answers `422 UNSUPPORTED_SOURCE` with an explanation, and `/api/media-info` returns the real metadata with `"metadataAvailable": true`, `"downloadAvailable": false`, `"formats": []`, and a single `limitations` entry (the legacy `downloadSupported` and `limitation` fields remain for compatibility). The explanation is published **once** — `notes` is empty for this source — and the UI renders it once, inside the media card.
+
+#### Integration evaluation (why there is no YouTube download)
+
+| Mechanism | Metadata | Media bytes | Verdict |
+| --- | --- | --- | --- |
+| YouTube Data API v3 (`videos.list`) | ✅ documented | ❌ returns snippets/`contentDetails`, never stream URLs | metadata only |
+| YouTube oEmbed | ✅ documented, key-free | ❌ title/author/thumbnail only | metadata only |
+| IFrame Player API | ⚠️ playback inside an embedded player | ❌ no byte access, no file to hand to a user | not a download API |
+| "YouTube download API" / licensed partner endpoints | — | — | **none published**; no documented terms, auth or quota to integrate against |
+| `yt-dlp` / signature ("cipher") extraction / page scraping | — | ✅ technically possible | **not permitted** by YouTube's ToS — deliberately absent |
+| Third-party "save from" services | — | — | no documented, permitted server-side API; scraping violates their terms |
+
+Because none of the permitted, documented integrations expose media bytes, the
+application reports `downloadAvailable: false` with one clear explanation rather
+than inventing stream URLs or formats. The handler registry
+(`src/lib/source-handlers.ts`) is the extension point: a future provider needs
+verified terms, server-side credentials and a security review before it can
+advertise `download.supported = true`.
 
 Deployment consequences (also in `.env.example`):
 
@@ -165,7 +212,7 @@ Response (all values come from real inspection; unavailable values are `null`):
 
 Rules enforced while building `formats`:
 
-* an `original` entry exists only for the container that was actually downloaded;
+* an `original` entry exists only for the container that was actually downloaded — including audio-only MP4/WebM containers, which are served byte-for-byte;
 * MP3 conversions are listed only when FFmpeg is present **and** the source has an audio stream **and** a real verification encode succeeded;
 * the verified MP3 variant carries its real `filesize`; the other bitrates are `filesize: null` because they are encoded at download time (and re-probed then);
 * `bitrate` always describes the *delivered* stream; `sourceAudioBitrate` keeps the source's original audio bitrate so a lossy conversion is never presented as an upgrade;
@@ -245,7 +292,7 @@ System **FFmpeg/ffprobe** (with `libmp3lame`) are the recommended installation; 
 ### Checks
 
 ```bash
-npm test        # 121 tests: unit, HTTP/API integration, jsdom UI
+npm test        # 131 tests: unit, HTTP/API integration, jsdom UI
 npm run typecheck
 npm run lint
 npm run build

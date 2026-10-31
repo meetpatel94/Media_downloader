@@ -5,6 +5,7 @@ import type { MediaContainer, MediaFormat, MediaInfo } from "@/lib/media-contrac
 
 type OutputContainer = MediaContainer;
 type StatusTone = "idle" | "error" | "success" | "loading";
+type BusyAction = "info" | "download" | null;
 
 type Status = { tone: StatusTone; message: string };
 
@@ -15,6 +16,8 @@ const IDLE_STATUS: Status = { tone: "idle", message: "" };
 
 const CONTAINER_ORDER: OutputContainer[] = ["mp4", "webm", "m4a", "mp3"];
 
+const NO_FORMAT_MESSAGE = "No downloadable formats are available for this source.";
+
 function parseHttpUrl(value: string): URL | null {
   try {
     const parsed = new URL(value);
@@ -23,6 +26,63 @@ function parseHttpUrl(value: string): URL | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Collapse whitespace, drop blanks and remove repeats while preserving the
+ * server's order. A single, de-duplicated list is what keeps one limitation
+ * from being shown twice.
+ */
+export function uniqueMessages(values: Array<string | null | undefined> | null | undefined): string[] {
+  if (!Array.isArray(values)) return [];
+
+  const seen = new Set<string>();
+  const messages: string[] = [];
+
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+
+    const message = value.replace(/\s+/g, " ").trim();
+    if (!message || seen.has(message)) continue;
+
+    seen.add(message);
+    messages.push(message);
+  }
+
+  return messages;
+}
+
+/**
+ * The formats the UI may offer. The backend only sends formats it has verified,
+ * and `downloadAvailable` must also agree; a format list without downloadable
+ * media must never produce a button.
+ */
+export function downloadableFormats(media: Media | null | undefined): Format[] {
+  if (!media || media.downloadAvailable === false || !Array.isArray(media.formats)) return [];
+
+  return media.formats.filter(
+    (format) =>
+      Boolean(format) &&
+      typeof format.id === "string" &&
+      format.id.length > 0 &&
+      CONTAINER_ORDER.includes(format.container),
+  );
+}
+
+/** Source/deployment limitations, de-duplicated (legacy `limitation` included). */
+export function mediaLimitations(media: Media | null | undefined): string[] {
+  if (!media) return [];
+
+  return uniqueMessages([...(Array.isArray(media.limitations) ? media.limitations : []), media.limitation]);
+}
+
+/** Supplementary notes that are not already shown as limitations. */
+export function mediaNotes(media: Media | null | undefined): string[] {
+  if (!media) return [];
+
+  const limitations = new Set(mediaLimitations(media));
+
+  return uniqueMessages(Array.isArray(media.notes) ? media.notes : []).filter((note) => !limitations.has(note));
 }
 
 /** Read the RFC 6266 filename, preferring the UTF-8 encoded variant. */
@@ -93,7 +153,7 @@ export function groupFormats(formats: Format[]): Array<{ container: OutputContai
   const groups = new Map<string, { container: OutputContainer; formats: Format[]; conversion: boolean }>();
 
   for (const format of formats) {
-    const key = `${format.container}-${format.conversion ? "converted" : "original"}`;
+    const key = groupKeyOf(format);
     const existing = groups.get(key);
 
     if (existing) existing.formats.push(format);
@@ -110,19 +170,32 @@ function groupLabel(group: ReturnType<typeof groupFormats>[number]): string {
   return group.conversion ? `${container} — converted` : `${container} — original file`;
 }
 
+function streamSummary(format: Format): string {
+  const streams = format.hasVideo && format.hasAudio ? "Audio and video" : format.hasVideo ? "Video only" : "Audio only";
+
+  return `${streams}${format.conversion ? ", converted on the server" : ", original file"}`;
+}
+
 export function DownloaderForm() {
   const [url, setUrl] = useState("");
   const [media, setMedia] = useState<Media | null>(null);
   const [groupKey, setGroupKey] = useState("");
   const [formatId, setFormatId] = useState("");
   const [status, setStatus] = useState<Status>(IDLE_STATUS);
-  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const abortRef = useRef<AbortController | null>(null);
   const inFlight = useRef(false);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  const groups = useMemo(() => groupFormats(media?.formats ?? []), [media]);
+  const busy = busyAction !== null;
+
+  // Only server-verified, genuinely downloadable formats reach the UI.
+  const formats = useMemo(() => downloadableFormats(media), [media]);
+  const limitations = useMemo(() => mediaLimitations(media), [media]);
+  const notes = useMemo(() => mediaNotes(media), [media]);
+
+  const groups = useMemo(() => groupFormats(formats), [formats]);
   const activeGroup = groups.find((group) => groupKeyOf(group) === groupKey) ?? groups[0];
   const selectedFormat = activeGroup?.formats.find((format) => format.id === formatId) ?? activeGroup?.formats[0];
 
@@ -132,8 +205,7 @@ export function DownloaderForm() {
     "flex min-h-12 w-full items-center justify-center rounded-2xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-400 disabled:bg-slate-400";
 
   function resetSelection(next: Media) {
-    const nextGroups = groupFormats(next.formats);
-    const first = nextGroups[0];
+    const first = groupFormats(downloadableFormats(next))[0];
 
     setGroupKey(first ? groupKeyOf(first) : "");
     setFormatId(first?.formats[0]?.id ?? "");
@@ -159,7 +231,7 @@ export function DownloaderForm() {
     }
 
     if (action === "download" && !selectedFormat) {
-      setStatus({ tone: "error", message: "Fetch media information and select an available format first." });
+      setStatus({ tone: "error", message: "Fetch media information and choose a verified format first." });
       return;
     }
 
@@ -170,7 +242,7 @@ export function DownloaderForm() {
     }
 
     inFlight.current = true;
-    setBusy(true);
+    setBusyAction(action);
     setStatus({ tone: "loading", message: action === "info" ? "Inspecting media…" : "Preparing download…" });
 
     const controller = new AbortController();
@@ -205,11 +277,14 @@ export function DownloaderForm() {
         const next = payload.media as Media;
         setMedia(next);
         resetSelection(next);
+
+        // The status line only reports the *operation*. Source limitations are
+        // rendered once, inside the media card, so they are never repeated here.
         setStatus({
           tone: "success",
-          message: next.formats.length
+          message: downloadableFormats(next).length
             ? "Media information ready. Choose a format and download."
-            : next.limitation ?? next.limitations[0] ?? "No downloadable formats are available for this source.",
+            : "Media information ready.",
         });
       } else {
         const type = response.headers.get("content-type") ?? "";
@@ -238,7 +313,7 @@ export function DownloaderForm() {
       });
     } finally {
       inFlight.current = false;
-      setBusy(false);
+      setBusyAction(null);
       abortRef.current = null;
     }
   }
@@ -283,7 +358,7 @@ export function DownloaderForm() {
       </div>
 
       <button className={button} disabled={busy} type="submit">
-        {busy ? "Working…" : "Fetch Info"}
+        {busyAction === "info" ? "Working…" : "Fetch Info"}
       </button>
 
       {media && (
@@ -329,7 +404,18 @@ export function DownloaderForm() {
             </p>
           )}
 
-          {media.formats.length > 0 && activeGroup && selectedFormat ? (
+          {/* Every limitation is rendered here exactly once — never in the status line. */}
+          {limitations.length > 0 && (
+            <div className="space-y-1 break-words" data-testid="media-limitations">
+              <ul className="list-disc space-y-1 pl-5 text-slate-800">
+                {limitations.map((limitation) => (
+                  <li key={limitation}>{limitation}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {selectedFormat && activeGroup ? (
             <div className="space-y-4">
               <div className="space-y-2">
                 <label htmlFor="format" className="block font-medium text-slate-900">
@@ -372,14 +458,7 @@ export function DownloaderForm() {
               )}
 
               <div className="space-y-1 break-words">
-                <p>
-                  {selectedFormat.hasVideo && selectedFormat.hasAudio
-                    ? "Audio and video"
-                    : selectedFormat.hasVideo
-                      ? "Video only"
-                      : "Audio only"}
-                  {selectedFormat.conversion ? ", converted on the server" : ", original file"}
-                </p>
+                <p>{streamSummary(selectedFormat)}</p>
                 {selectedFormat.hasVideo && (
                   <p>
                     Video codec: {selectedFormat.videoCodec ?? "unavailable"} · Resolution:{" "}
@@ -388,11 +467,14 @@ export function DownloaderForm() {
                 )}
                 <p>
                   Audio codec: {selectedFormat.audioCodec ?? "unavailable"}
-                  {selectedFormat.hasVideo && selectedFormat.bitrate ? ` · Video bitrate: ${selectedFormat.bitrate}` : ""}
+                  {selectedFormat.hasVideo && selectedFormat.bitrate
+                    ? ` · Video bitrate: ${selectedFormat.bitrate}`
+                    : ""}
                 </p>
                 {selectedFormat.conversion && selectedFormat.sourceAudioBitrate && (
                   <p>
-                    Source audio bitrate: {selectedFormat.sourceAudioBitrate} → output {selectedFormat.bitrate}
+                    Source audio bitrate: {selectedFormat.sourceAudioBitrate} → output{" "}
+                    {selectedFormat.bitrate}
                   </p>
                 )}
                 <p>File size: {formatSize(selectedFormat.filesize)}</p>
@@ -406,25 +488,23 @@ export function DownloaderForm() {
               <button
                 type="button"
                 className={button}
-                disabled={busy || !selectedFormat}
+                disabled={busy}
                 onClick={() => void run("download")}
               >
-                {busy ? "Working…" : "Download"}
+                {busyAction === "download" ? "Preparing download…" : "Download"}
               </button>
             </div>
           ) : (
-            <p className="break-words font-medium text-slate-800">
-              {media.limitation ?? "No downloadable formats are available for this source."}
-            </p>
+            limitations.length === 0 && (
+              <p className="break-words font-medium text-slate-800">{NO_FORMAT_MESSAGE}</p>
+            )
           )}
 
-          {media.notes.filter((note) => note !== media.limitation).length > 0 && (
+          {notes.length > 0 && (
             <ul className="list-disc space-y-1 break-words pl-5 text-xs text-slate-600">
-              {media.notes
-                .filter((note) => note !== media.limitation)
-                .map((note) => (
-                  <li key={note}>{note}</li>
-                ))}
+              {notes.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
             </ul>
           )}
 
@@ -436,8 +516,8 @@ export function DownloaderForm() {
 
       <p
         id="download-status"
-        role="status"
-        aria-live="polite"
+        role={status.tone === "error" ? "alert" : "status"}
+        aria-live={status.tone === "error" ? "assertive" : "polite"}
         className={`min-h-5 break-words text-sm leading-6 ${
           status.tone === "error" ? "text-rose-700" : "text-slate-700"
         }`}
@@ -448,6 +528,6 @@ export function DownloaderForm() {
   );
 }
 
-function groupKeyOf(group: { container: OutputContainer; conversion: boolean }): string {
-  return `${group.container}-${group.conversion ? "converted" : "original"}`;
+function groupKeyOf(format: { container: OutputContainer; conversion: boolean }): string {
+  return `${format.container}-${format.conversion ? "converted" : "original"}`;
 }
