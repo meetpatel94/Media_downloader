@@ -87,6 +87,10 @@ async function leftoverTempDirs(): Promise<string[]> {
 type MediaResponse = {
   success: boolean;
   media: {
+    metadataAvailable: boolean;
+    downloadAvailable: boolean;
+    supportedConversions: string[];
+    limitations: string[];
     title: string | null;
     duration: number | null;
     thumbnail: string | null;
@@ -144,7 +148,11 @@ test("inspects a real MP4 and reports verified, content-bound formats", async ()
       assert.equal(payload.success, true);
       assert.equal(payload.media.sourceType, "direct-media");
       assert.equal(payload.media.sourceLabel, "Direct media file");
+      assert.equal(payload.media.metadataAvailable, true);
+      assert.equal(payload.media.downloadAvailable, true);
       assert.equal(payload.media.downloadSupported, true);
+      assert.deepEqual(payload.media.supportedConversions, ["mp3"]);
+      assert.deepEqual(payload.media.limitations, []);
       assert.equal(payload.media.thumbnail, null);
       assert.ok(payload.media.duration !== null && Math.abs(payload.media.duration - 1.5) < 0.3);
 
@@ -363,8 +371,12 @@ test("returns YouTube metadata but correctly reports that download is unavailabl
       assert.equal(payload.media.title, "Real YouTube title");
       assert.equal(payload.media.author, "Real channel");
       assert.equal(payload.media.thumbnail, "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg");
+      assert.equal(payload.media.metadataAvailable, true);
+      assert.equal(payload.media.downloadAvailable, false);
       assert.equal(payload.media.downloadSupported, false);
+      assert.deepEqual(payload.media.supportedConversions, []);
       assert.deepEqual(payload.media.formats, []);
+      assert.equal(payload.media.limitations[0], payload.media.limitation);
       assert.match(payload.media.limitation ?? "", /cannot be downloaded/i);
       assert.doesNotMatch(payload.media.limitation ?? "", /extractor/i);
 

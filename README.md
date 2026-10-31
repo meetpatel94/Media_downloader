@@ -99,7 +99,7 @@ YouTube URLs (watch, `youtu.be`, Shorts, embed, live, music) are recognised and 
 
 If the Data API fails for a transient/quota reason the key-free oEmbed endpoint is used automatically.
 
-**Downloading is a different capability and is not implemented.** The Data API returns metadata and embed players, not media files; YouTube's Terms of Service prohibit downloading except through features they provide. There is no `yt-dlp`, no signature/cipher extraction, no page scraping, no DRM bypass, and no third-party "save from" endpoint in this repository. `POST /api/download` for a YouTube URL answers `422 UNSUPPORTED_SOURCE` with an explanation, and `/api/media-info` returns the real metadata with `"formats": []`, `"downloadSupported": false` and a `limitation` string.
+**Downloading is a different capability and is not implemented.** The Data API returns metadata and embed players, not media files; YouTube's Terms of Service prohibit downloading except through features they provide. There is no `yt-dlp`, no signature/cipher extraction, no page scraping, no DRM bypass, and no third-party "save from" endpoint in this repository. `POST /api/download` for a YouTube URL answers `422 UNSUPPORTED_SOURCE` with an explanation, and `/api/media-info` returns the real metadata with `"metadataAvailable": true`, `"downloadAvailable": false`, `"formats": []`, and a `limitations` entry (the legacy `downloadSupported` and `limitation` fields remain for compatibility).
 
 Deployment consequences (also in `.env.example`):
 
@@ -135,7 +135,11 @@ Response (all values come from real inspection; unavailable values are `null`):
     "sourceLabel": "Direct media file",
     "author": null,
     "metadataProvider": null,
+    "metadataAvailable": true,
+    "downloadAvailable": true,
     "downloadSupported": true,
+    "supportedConversions": ["mp3"],
+    "limitations": [],
     "limitation": null,
     "notes": [],
     "formats": [

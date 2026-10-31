@@ -1,40 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { MediaContainer, MediaFormat, MediaInfo } from "@/lib/media-contract";
 
-type OutputContainer = "mp4" | "webm" | "m4a" | "mp3";
+type OutputContainer = MediaContainer;
 type StatusTone = "idle" | "error" | "success" | "loading";
 
 type Status = { tone: StatusTone; message: string };
 
-export type Format = {
-  id: string;
-  container: OutputContainer;
-  label: string;
-  resolution: string | null;
-  videoCodec: string | null;
-  audioCodec: string | null;
-  filesize: number | null;
-  bitrate: string | null;
-  sourceAudioBitrate: string | null;
-  hasVideo: boolean;
-  hasAudio: boolean;
-  conversion: boolean;
-};
-
-export type Media = {
-  title: string | null;
-  duration: number | null;
-  thumbnail: string | null;
-  sourceType: string;
-  sourceLabel: string;
-  author: string | null;
-  metadataProvider: string | null;
-  downloadSupported: boolean;
-  limitation: string | null;
-  notes: string[];
-  formats: Format[];
-};
+export type Format = MediaFormat;
+export type Media = MediaInfo;
 
 const IDLE_STATUS: Status = { tone: "idle", message: "" };
 
@@ -234,7 +209,7 @@ export function DownloaderForm() {
           tone: "success",
           message: next.formats.length
             ? "Media information ready. Choose a format and download."
-            : next.limitation ?? "No downloadable formats are available for this source.",
+            : next.limitation ?? next.limitations[0] ?? "No downloadable formats are available for this source.",
         });
       } else {
         const type = response.headers.get("content-type") ?? "";

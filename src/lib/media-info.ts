@@ -21,6 +21,8 @@ import { acquireSlot, type Slot } from "@/lib/concurrency";
 import { validateMediaUrl } from "@/lib/download-validation";
 import { DownloadError } from "@/lib/errors";
 import { getFfmpegStatus } from "@/lib/ffmpeg";
+import type { MediaContainer, MediaFormat, MediaInfo } from "@/lib/media-contract";
+export type { MediaFormat, MediaInfo } from "@/lib/media-contract";
 import {
   allowedMp3Bitrates,
   decodeFormatId,
@@ -42,42 +44,6 @@ import {
 } from "@/lib/media-processing";
 import { containerKind, type Container } from "@/lib/media-inspect";
 import { getSourceHandler } from "@/lib/source-handlers";
-
-export type MediaFormat = {
-  /** Opaque, content-bound id. The download endpoint re-validates it. */
-  id: string;
-  container: OutputContainer;
-  /** Ready-to-render label, e.g. `MP4 — 720p` or `MP3 — 192 kbps`. */
-  label: string;
-  resolution: string | null;
-  videoCodec: string | null;
-  audioCodec: string | null;
-  filesize: number | null;
-  /** Bitrate of the delivered stream (target bitrate for conversions). */
-  bitrate: string | null;
-  /** Bitrate of the source audio, when it differs from the delivered one. */
-  sourceAudioBitrate: string | null;
-  hasVideo: boolean;
-  hasAudio: boolean;
-  /** `true` when FFmpeg produced this output, `false` for the untouched source. */
-  conversion: boolean;
-};
-
-export type MediaInfo = {
-  title: string | null;
-  duration: number | null;
-  thumbnail: string | null;
-  sourceType: "direct-media" | "youtube";
-  sourceLabel: string;
-  author: string | null;
-  /** Which metadata provider answered, when applicable. */
-  metadataProvider: string | null;
-  downloadSupported: boolean;
-  /** Single, most important limitation; `null` when everything is available. */
-  limitation: string | null;
-  notes: string[];
-  formats: MediaFormat[];
-};
 
 export type DownloadArtifact = {
   filePath: string;
@@ -279,6 +245,9 @@ export async function inspectMedia(
     if (!inspection.media) {
       const notes = inspection.notes.filter(Boolean);
       const media: MediaInfo = {
+        metadataAvailable: true,
+        downloadAvailable: false,
+        downloadSupported: false,
         title: inspection.metadata.title,
         duration: inspection.metadata.duration,
         thumbnail: inspection.metadata.thumbnail,
@@ -286,10 +255,11 @@ export async function inspectMedia(
         sourceLabel: handler.label,
         author: inspection.metadata.author,
         metadataProvider: inspection.metadata.provider,
-        downloadSupported: false,
+        formats: [],
+        supportedConversions: [],
+        limitations: notes,
         limitation: notes[0] ?? null,
         notes,
-        formats: [],
       };
 
       return { media };
@@ -367,7 +337,16 @@ export async function inspectMedia(
       verifiedMp3,
     });
 
+    const limitation =
+      formats.length === 0
+        ? ffmpeg.available
+          ? "No downloadable format could be produced from this file."
+          : "Only MP3 conversion could add a format here, and FFmpeg is not installed on this server."
+        : null;
     const media: MediaInfo = {
+      metadataAvailable: true,
+      downloadAvailable: formats.length > 0,
+      downloadSupported: formats.length > 0,
       title: inspection.metadata.title ?? title,
       duration: inspection.metadata.duration ?? duration,
       thumbnail: inspection.metadata.thumbnail,
@@ -375,15 +354,11 @@ export async function inspectMedia(
       sourceLabel: handler.label,
       author: inspection.metadata.author,
       metadataProvider: inspection.metadata.provider,
-      downloadSupported: true,
-      limitation:
-        formats.length === 0
-          ? ffmpeg.available
-            ? "No downloadable format could be produced from this file."
-            : "Only MP3 conversion could add a format here, and FFmpeg is not installed on this server."
-          : null,
-      notes,
       formats,
+      supportedConversions: [...new Set(formats.filter((format) => format.conversion).map((format) => format.container))] as MediaContainer[],
+      limitations: limitation ? [limitation] : [],
+      limitation,
+      notes,
     };
 
     if (selection) {
