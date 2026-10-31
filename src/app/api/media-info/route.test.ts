@@ -522,7 +522,12 @@ test("reads the real file path and keeps temp storage clean", async () => {
   assert.deepEqual(await leftoverTempDirs(), []);
 });
 
-test("does not advertise MP3 when the encoder fails, and explains the failure", async () => {
+test(
+  "does not advertise MP3 when the encoder fails, and explains the failure",
+  {
+    skip: process.platform === "win32" ? "Uses a POSIX shell fixture" : false,
+  },
+  async () => {
   const { mkdtemp: makeDir, writeFile: write, chmod, rm: remove } = await import("node:fs/promises");
   const dir = await makeDir(join(tmpdir(), "fake-ffmpeg-"));
   const script = join(dir, "ffmpeg");
