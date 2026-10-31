@@ -63,7 +63,8 @@ src/app/api/*/route.ts        request parsing (8 KiB cap), HTTP status mapping
 src/lib/media-info.ts         inspect → probe → build verified formats → produce output
    ├── src/lib/source-handlers.ts   per-source capability model + fetch
    │     ├── direct handler    guarded HTTP download → temp file
-   │     └── platform handler  official YouTube metadata only (no download)
+   │     └── platform handler  delegates to official provider registry
+   ├── src/lib/platform-providers.ts  typed provider registry + capability declarations
    ├── src/lib/platform.ts     YouTube oEmbed / Data API v3 metadata client
    ├── src/lib/media-processing.ts  ffprobe probe, size checks, output production
    ├── src/lib/ffmpeg.ts       FFmpeg discovery, MP3/MP4 conversion
@@ -89,7 +90,9 @@ type SourceHandler = {
 };
 ```
 
-`GET /api/health` publishes the source matrix and a separate `platformProviders` list, so a deployment can inspect each registered platform adapter without exposing credentials. `src/lib/platform-providers.ts` is the extension point for additional official integrations. Each provider must declare metadata and download capabilities independently. The initial registry contains YouTube only; its metadata capability delegates to the existing official oEmbed / Data API client, while its download capability remains disabled.\n\n`GET /api/health` publishes that matrix, so a deployment can prove what it supports:
+`GET /api/health` publishes the source matrix and a separate `platformProviders` list, so a deployment can inspect each registered platform adapter without exposing credentials. `src/lib/platform-providers.ts` is the extension point for additional official integrations. Each provider must declare metadata and download capabilities independently. The initial registry contains YouTube only; its metadata capability delegates to the existing official oEmbed / Data API client, while its download capability remains disabled.
+
+`GET /api/health` publishes that matrix, so a deployment can prove what it supports:
 
 ```json
 "sources": [
