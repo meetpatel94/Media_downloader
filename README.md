@@ -89,7 +89,7 @@ type SourceHandler = {
 };
 ```
 
-`GET /api/health` publishes that matrix, so a deployment can prove what it supports:
+`GET /api/health` publishes the source matrix and a separate `platformProviders` list, so a deployment can inspect each registered platform adapter without exposing credentials. `src/lib/platform-providers.ts` is the extension point for additional official integrations. Each provider must declare metadata and download capabilities independently. The initial registry contains YouTube only; its metadata capability delegates to the existing official oEmbed / Data API client, while its download capability remains disabled.\n\n`GET /api/health` publishes that matrix, so a deployment can prove what it supports:
 
 ```json
 "sources": [
