@@ -21,7 +21,7 @@ import { getConfig } from "@/lib/config";
 import { openRemoteMedia, streamToFile } from "@/lib/http-media";
 import { sniffContainer, type Container, type MediaKind } from "@/lib/media-inspect";
 import type { OutputContainer } from "@/lib/formats";
-import { fetchYouTubeMetadata, youTubeCapability, type YouTubeMetadata } from "@/lib/platform";
+import { getPlatformProvider } from "@/lib/platform-providers";
 import { MESSAGES, type ClassifiedSource, type SourceKind } from "@/lib/sources";
 
 export type SourceCapability = "metadata" | "download";
@@ -169,23 +169,17 @@ const directMediaHandler: SourceHandler = {
  * DRM bypass or third-party "download service" integration.
  */
 function platformCapabilities(): Record<SourceCapability, CapabilityState> {
-  const metadata = youTubeCapability();
+  const provider = getPlatformProvider("youtube");
 
   return {
-    metadata: {
-      supported: metadata.supported,
-      reason: metadata.reason,
-    },
-    download: {
-      supported: false,
-      reason: MESSAGES.platformDownloadNotSupported,
-    },
+    metadata: provider.metadataCapability(),
+    download: provider.downloadCapability(),
   };
 }
 
 const platformHandler: SourceHandler = {
   kind: "platform",
-  label: "YouTube video",
+  label: getPlatformProvider("youtube").label,
 
   capabilities: platformCapabilities,
 
@@ -205,7 +199,8 @@ const platformHandler: SourceHandler = {
       throw new DownloadError("UNSUPPORTED_SOURCE", MESSAGES.unsupportedSource);
     }
 
-    const metadata: YouTubeMetadata = await fetchYouTubeMetadata(platform.videoId, context.signal);
+    const provider = getPlatformProvider(platform.name);
+    const metadata = await provider.fetchMetadata({ videoId: platform.videoId, signal: context.signal });
 
     return {
       metadata: {

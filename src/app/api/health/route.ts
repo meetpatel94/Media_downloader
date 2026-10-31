@@ -4,6 +4,7 @@ import { getFfmpegStatus } from "@/lib/ffmpeg";
 import { getConcurrencySnapshot } from "@/lib/concurrency";
 import { listSourceHandlers } from "@/lib/source-handlers";
 import { youTubeCapability } from "@/lib/platform";
+import { listPlatformProviders } from "@/lib/platform-providers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,6 +47,7 @@ export async function GET() {
         maxConcurrentDownloads: config.maxConcurrentJobs,
       },
       sources: listSourceHandlers(),
+      platformProviders: listPlatformProviders(),
       jobs: getConcurrencySnapshot(),
     },
     {
