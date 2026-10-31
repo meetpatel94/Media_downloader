@@ -376,7 +376,11 @@ test("returns YouTube metadata but correctly reports that download is unavailabl
       assert.equal(payload.media.downloadSupported, false);
       assert.deepEqual(payload.media.supportedConversions, []);
       assert.deepEqual(payload.media.formats, []);
+      // The explanation is published exactly once: as a limitation, never
+      // again in `notes`, so the UI cannot render it twice.
+      assert.equal(payload.media.limitations.length, 1);
       assert.equal(payload.media.limitations[0], payload.media.limitation);
+      assert.deepEqual(payload.media.notes, []);
       assert.match(payload.media.limitation ?? "", /cannot be downloaded/i);
       assert.doesNotMatch(payload.media.limitation ?? "", /extractor/i);
 
@@ -548,4 +552,83 @@ test("does not advertise MP3 when the encoder fails, and explains the failure", 
     resetFfmpegCache();
     await remove(dir, { recursive: true, force: true });
   }
+});
+
+test("offers and serves an audio-only MP4 as the real MP4 file", async () => {
+  const body = await mediaFixture("audio-mp4");
+
+  await withNetwork(
+    () => streamResponse([body], { contentType: "audio/mp4", contentLength: body.byteLength }),
+    async () => {
+      const { response, payload } = await inspect(MP4_URL);
+      assert.equal(response.status, 200);
+      assert.equal(payload.media.downloadAvailable, true);
+
+      // The source bytes really are an MP4, so the original file is offered
+      // even though the container carries no video stream.
+      const original = payload.media.formats.find((format) => format.container === "mp4" && !format.conversion);
+      assert.ok(original, "audio-only MP4 must remain downloadable as-is");
+      assert.equal(original.hasVideo, false);
+      assert.equal(original.hasAudio, true);
+      assert.equal(original.audioCodec, "aac");
+      assert.equal(original.filesize, body.byteLength);
+      assert.equal(original.resolution, null);
+
+      // MP3 conversions are still advertised when FFmpeg is configured.
+      assert.ok(payload.media.formats.some((format) => format.container === "mp3" && format.conversion));
+
+      const downloadResponse = await download(
+        downloadReq({ url: MP4_URL, formatId: original.id, outputFormat: "mp4" }),
+      );
+      assert.equal(downloadResponse.status, 200);
+      assert.equal(downloadResponse.headers.get("content-type"), "video/mp4");
+      assert.match(downloadResponse.headers.get("content-disposition") ?? "", /filename="sample\.mp4"/);
+
+      const { dir, bytes } = await downloadToFile(downloadResponse);
+      try {
+        assert.deepEqual(bytes, Buffer.from(body));
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+test("offers and serves an audio-only WebM as the real WebM file", async () => {
+  let body: Uint8Array;
+
+  try {
+    body = await mediaFixture("audio-webm");
+  } catch {
+    // The installed FFmpeg build has no WebM audio encoder; nothing to verify.
+    return;
+  }
+
+  await withNetwork(
+    () => streamResponse([body], { contentType: "audio/webm", contentLength: body.byteLength }),
+    async () => {
+      const { response, payload } = await inspect(WEBM_URL);
+      assert.equal(response.status, 200);
+      assert.equal(payload.media.downloadAvailable, true);
+
+      const original = payload.media.formats.find((format) => format.container === "webm" && !format.conversion);
+      assert.ok(original, "audio-only WebM must remain downloadable as-is");
+      assert.equal(original.hasVideo, false);
+      assert.equal(original.hasAudio, true);
+      assert.equal(original.filesize, body.byteLength);
+
+      const downloadResponse = await download(
+        downloadReq({ url: WEBM_URL, formatId: original.id, outputFormat: "webm" }),
+      );
+      assert.equal(downloadResponse.status, 200);
+      assert.equal(downloadResponse.headers.get("content-type"), "video/webm");
+
+      const { dir, bytes } = await downloadToFile(downloadResponse);
+      try {
+        assert.deepEqual(bytes, Buffer.from(body));
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

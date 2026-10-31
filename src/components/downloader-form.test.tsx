@@ -3,7 +3,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { DownloaderForm, groupFormats, filenameFromDisposition, type Media } from "@/components/downloader-form";
+import {
+  DownloaderForm,
+  downloadableFormats,
+  groupFormats,
+  filenameFromDisposition,
+  mediaLimitations,
+  mediaNotes,
+  uniqueMessages,
+  type Media,
+} from "@/components/downloader-form";
 import { setupDom, type DomHarness } from "@/test-utils/dom";
 
 const DIGEST = "a".repeat(64);
@@ -379,4 +388,210 @@ test("groups formats by container without inventing options", () => {
 test("safe filename fallback", () => {
   assert.equal(filenameFromDisposition(null, "mp3"), "media-download.mp3");
   assert.equal(filenameFromDisposition('attachment; filename="clip.mp4"', "mp4"), "clip.mp4");
+});
+
+/** How many times a literal string occurs in a rendered subtree. */
+function occurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+const YOUTUBE_LIMITATION =
+  "YouTube media files cannot be downloaded by this deployment: YouTube's official APIs provide metadata only and " +
+  "do not permit retrieving the video or audio streams, and no licensed download integration is configured.";
+
+function youtubeMedia(overrides: Partial<Media> = {}): Media {
+  return {
+    ...MEDIA,
+    downloadAvailable: false,
+    downloadSupported: false,
+    supportedConversions: [],
+    sourceType: "youtube",
+    sourceLabel: "YouTube video",
+    title: "Real YouTube title",
+    author: "Real channel",
+    metadataProvider: "youtube-oembed",
+    thumbnail: null,
+    formats: [],
+    limitations: [YOUTUBE_LIMITATION],
+    limitation: YOUTUBE_LIMITATION,
+    // The server may repeat the limitation in notes (legacy payloads); the UI
+    // must still render it only once.
+    notes: [YOUTUBE_LIMITATION, YOUTUBE_LIMITATION],
+    ...overrides,
+  };
+}
+
+test("metadata-only source renders its limitation once, inside the media card", async () => {
+  const network = mockFetch(() => Response.json({ success: true, media: youtubeMedia() }));
+  const { harness, unmount } = await render();
+
+  try {
+    await act(async () => harness.setTextareaValue("media-url", "https://youtu.be/dQw4w9WgXcQ"));
+    await act(async () => harness.submitForm());
+
+    const card = harness.container.querySelector('section[aria-labelledby="media-heading"]');
+    assert.ok(card, "media information card must be rendered");
+    assert.match(card.textContent ?? "", /Real YouTube title/);
+    assert.match(card.textContent ?? "", /Real channel/);
+
+    // Exactly one rendering of the limitation, and it lives in the card.
+    const documentText = harness.container.textContent ?? "";
+    assert.equal(occurrences(documentText, YOUTUBE_LIMITATION), 1);
+    assert.ok(card.textContent?.includes(YOUTUBE_LIMITATION), "limitation belongs to the media card");
+    assert.ok(!harness.statusText().includes("cannot be downloaded"), "the status line must not repeat it");
+
+    // A metadata-only source gets no fake download affordance.
+    assert.equal(harness.document.getElementById("format"), null);
+    assert.equal(harness.document.getElementById("quality"), null);
+    assert.equal(
+      [...harness.container.querySelectorAll("button")].some((button) => button.textContent === "Download"),
+      false,
+      "no Download button without a verified format",
+    );
+  } finally {
+    network.restore();
+    await unmount();
+  }
+});
+
+test("a downloadable source never repeats a note or limitation", async () => {
+  const note = "MP3 conversion is unavailable on this server: FFmpeg was not found.";
+  const media: Media = {
+    ...MEDIA,
+    limitations: [],
+    limitation: null,
+    notes: [note, note, MEDIA.formats[0].label],
+  };
+  const network = mockFetch(() => Response.json({ success: true, media }));
+  const { harness, unmount } = await render();
+
+  try {
+    await act(async () => harness.setTextareaValue("media-url", "https://samplelib.com/a.mp4"));
+    await act(async () => harness.submitForm());
+
+    const text = harness.container.textContent ?? "";
+    assert.equal(occurrences(text, note), 1);
+    assert.equal(occurrences(text, MEDIA.formats[0].label), 1);
+    assert.ok(harness.document.getElementById("format"));
+  } finally {
+    network.restore();
+    await unmount();
+  }
+});
+
+test("hides the Download button when the backend reports no downloadable format", async () => {
+  const media: Media = {
+    ...MEDIA,
+    formats: [],
+    downloadAvailable: false,
+    downloadSupported: false,
+    limitations: ["Every format was rejected by verification."],
+    limitation: "Every format was rejected by verification.",
+    notes: [],
+  };
+  const network = mockFetch(() => Response.json({ success: true, media }));
+  const { harness, unmount } = await render();
+
+  try {
+    await act(async () => harness.setTextareaValue("media-url", "https://samplelib.com/a.mp4"));
+    await act(async () => harness.submitForm());
+
+    assert.equal(harness.document.getElementById("format"), null);
+    assert.equal(harness.document.getElementById("quality"), null);
+    assert.equal(
+      [...harness.container.querySelectorAll("button")].some((button) => button.textContent === "Download"),
+      false,
+    );
+    assert.match(harness.container.textContent ?? "", /Every format was rejected by verification\./);
+    assert.equal(occurrences(harness.container.textContent ?? "", "Every format was rejected by verification."), 1);
+  } finally {
+    network.restore();
+    await unmount();
+  }
+});
+
+test("a format list that contradicts downloadAvailable is not offered", async () => {
+  const media: Media = {
+    ...MEDIA,
+    downloadAvailable: false,
+    downloadSupported: false,
+  };
+  const network = mockFetch(() => Response.json({ success: true, media }));
+  const { harness, unmount } = await render();
+
+  try {
+    await act(async () => harness.setTextareaValue("media-url", "https://samplelib.com/a.mp4"));
+    await act(async () => harness.submitForm());
+
+    assert.equal(harness.document.getElementById("format"), null);
+    assert.equal(
+      [...harness.container.querySelectorAll("button")].some((button) => button.textContent === "Download"),
+      false,
+    );
+    // No limitation was supplied, so the fallback explanation is shown once.
+    assert.equal(occurrences(harness.container.textContent ?? "", "No downloadable formats are available for this source."), 1);
+  } finally {
+    network.restore();
+    await unmount();
+  }
+});
+
+test("missing formats fall back to one clear message, not an empty section", async () => {
+  const media: Media = {
+    ...MEDIA,
+    formats: [],
+    downloadAvailable: false,
+    downloadSupported: false,
+    limitations: [],
+    limitation: null,
+    notes: [],
+  };
+  const network = mockFetch(() => Response.json({ success: true, media }));
+  const { harness, unmount } = await render();
+
+  try {
+    await act(async () => harness.setTextareaValue("media-url", "https://samplelib.com/a.mp4"));
+    await act(async () => harness.submitForm());
+
+    const text = harness.container.textContent ?? "";
+    assert.equal(occurrences(text, "No downloadable formats are available for this source."), 1);
+    assert.equal(harness.document.querySelector('[data-testid="media-limitations"]'), null, "no empty limitation block");
+  } finally {
+    network.restore();
+    await unmount();
+  }
+});
+
+test("validation errors stay in the status line and do not create a media card", async () => {
+  const network = mockFetch(() => Response.json({ success: true, media: MEDIA }));
+  const { harness, unmount } = await render();
+
+  try {
+    await act(async () => harness.submitForm());
+    assert.equal(harness.statusText(), "Please paste a media URL.");
+    assert.equal(network.calls.length, 0);
+
+    await act(async () => harness.setTextareaValue("media-url", "not-a-url"));
+    await act(async () => harness.submitForm());
+    assert.equal(harness.statusText(), "Please enter a valid http:// or https:// URL.");
+    assert.equal(harness.document.getElementById("media-heading"), null);
+    assert.equal(network.calls.length, 0);
+  } finally {
+    network.restore();
+    await unmount();
+  }
+});
+
+test("message helpers de-duplicate and only expose verified formats", () => {
+  const media = youtubeMedia();
+
+  assert.deepEqual(mediaLimitations(media), [YOUTUBE_LIMITATION]);
+  assert.deepEqual(mediaNotes(media), []);
+  assert.deepEqual(downloadableFormats(media), []);
+  assert.equal(downloadableFormats({ ...MEDIA, downloadAvailable: false }).length, 0);
+  assert.equal(downloadableFormats(MEDIA).length, MEDIA.formats.length);
+  assert.deepEqual(downloadableFormats(null), []);
+  assert.deepEqual(uniqueMessages([" a ", "a", "", "b", "b"]), ["a", "b"]);
+  assert.deepEqual(mediaNotes({ ...MEDIA, notes: ["one", "one", "two"] }), ["one", "two"]);
+  assert.deepEqual(mediaNotes({ ...MEDIA, notes: ["one"], limitations: ["one"] }), []);
 });
